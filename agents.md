@@ -1,15 +1,21 @@
-# Plan de implementación: API pública para MarkItDown
+# Handoff técnico: API REST para MarkItDown
 
 ## Objetivo
 
-Publicar MarkItDown como una API REST para convertir archivos y URLs a Markdown, con cuentas individuales, claves API y registro de consumo. El despliegue inicial será en una VPS Ubuntu mediante Docker Compose en Dokploy.
+Este documento es el punto de partida para el siguiente agente. Describe la implementación existente y el estado confirmado del despliegue. No recrear el proyecto ni borrar volúmenes durante tareas de diagnóstico sin autorización explícita.
 
 ## Estado de implementación
 
-- Implementación inicial en `packages/markitdown-api/`: aplicación FastAPI, worker, almacenamiento temporal, modelo de datos, Compose, Dockerfile, documentación y pruebas.
-- Los pagos no están integrados. SMTP debe configurarse para habilitar el registro con verificación de correo (activado por defecto).
-- OCR usa el plugin de MarkItDown con Azure OpenAI cuando se solicita explícitamente y las credenciales están presentes; por defecto no se invoca.
-- El deployment Compose inicial es de una sola instancia API, un worker, concurrencia 1 y cola acotada. Se debe medir carga en la VPS antes de subir límites.
+- Implementación en `packages/markitdown-api/`: FastAPI, worker, cola Redis, PostgreSQL, almacenamiento temporal, Dockerfile, Compose, README y pruebas.
+- **Estado remoto confirmado (2026-11-03):** Dokploy `xperiencIA` / `production`; Compose `markitdown`; ruta `packages/markitdown-api/compose.yaml`; dominio `mdservice.innersoft.com.mx` asignado a `api:8000`.
+- El último despliegue consultado está en `done`; `api`, `worker`, `postgres` y `redis` están activos. `https://mdservice.innersoft.com.mx/health/live` y `/health/ready` respondieron `200`.
+- Se corrigió el `404 page not found`: Dokploy tenía el dominio configurado, pero los contenedores vivos no tenían labels Traefik ni estaban en `dokploy-network`. Se volvió a desplegar; el contenedor `api` ahora sí tiene las reglas y la red del proxy.
+- La rama desplegada es `HP240RG10-dev`. Confirmar la rama y el estado en Dokploy antes de cambios posteriores.
+- SMTP debe estar configurado si `EMAIL_VERIFICATION_REQUIRED=true` (valor predeterminado). Los pagos no están integrados.
+- OCR está disponible explícitamente mediante el plugin MarkItDown + Azure OpenAI si se configuran sus secretos; por defecto no se invoca.
+- El despliegue inicial usa una instancia API, un worker y una conversión simultánea. No aumentar concurrencia sin medir la VPS de 2 GB.
+- El repositorio está indexado en Codebase Memory con el nombre `markitdown`.
+- La suite del paquete API registró `18 passed`; Black/Ruff pasaron. El build de Docker no se pudo probar en el entorno local porque no había daemon Docker; Dokploy sí completó el build remoto.
 
 ## Requisitos acordados
 
@@ -26,7 +32,7 @@ Publicar MarkItDown como una API REST para convertir archivos y URLs a Markdown,
 - Conservar el resultado hasta una descarga completa o durante un máximo de 1.440 minutos (24 horas), lo que ocurra primero; eliminarlo después de una descarga completa.
 - Empezar con una conversión simultánea y una cola limitada, y ajustar los límites con pruebas de carga.
 
-## Arquitectura propuesta
+## Arquitectura implementada
 
 ```text
 Cliente
@@ -54,7 +60,7 @@ PostgreSQL             Redis / cola
 - **Volumen temporal:** mantiene las entradas mientras están pendientes/en proceso y los resultados hasta su entrega o expiración. Debe tener límites y limpieza automática.
 - **Dokploy:** publica el servicio API en el dominio configurado. Redis, PostgreSQL y workers permanecen en la red interna de Docker.
 
-Con 2 GB de RAM, se recomienda un worker con concurrencia 1. Redis y PostgreSQL en la misma VPS podrían competir por recursos con las conversiones; evaluar servicios externos para la base de datos y/o la cola. No anunciar capacidad de alta carga hasta medirla.
+Con 2 GB de RAM, mantener un worker con concurrencia 1. Redis y PostgreSQL se ejecutan en la misma VPS que Dokploy; conversiones complejas pueden agotar memoria. No anunciar capacidad de alta carga hasta medirla. El Compose limita recursos y resultados temporales, pero no elimina esta limitación física.
 
 ## Contrato inicial de API
 
@@ -70,15 +76,15 @@ Estados sugeridos: `queued`, `running`, `succeeded`, `failed`, `expired` y `canc
 
 La descarga se considerará completa cuando el servidor finalice el envío de la respuesta sin desconexión del cliente. Si el cliente se desconecta antes de completar la transferencia, conservar el resultado para un nuevo intento hasta la caducidad. El servidor no puede confirmar que el cliente haya guardado el archivo; si se requiere confirmación de aplicación, diseñar un endpoint de acuse de recibo.
 
-## Procesamiento, límites y capacidad
+## Procesamiento, límites y capacidad actuales
 
-1. Recibir archivos y descargas en streaming a disco; no cargar documentos de 100 MB completos en memoria.
-2. Aplicar el límite de 100 MB en el proxy/Dokploy y volver a validarlo en la aplicación. Configurar margen para la codificación multipart, sin elevar el límite real del archivo.
-3. Empezar con un worker y una conversión simultánea.
-4. Implementar una cola de tamaño acotado. Como valor inicial de prueba, evaluar un máximo de 5 trabajos pendientes, configurable y sujeto a los resultados de carga y al espacio temporal.
-5. Aplicar límites configurables de duración, memoria, CPU, concurrencia y uso de disco temporal.
-6. Ante cola llena, rechazar con respuesta controlada (`429` o `503`) en lugar de acumular archivos sin límite.
-7. Medir documentos representativos de hasta 100 MB y aumentar concurrencia solo si la VPS mantiene margen de memoria, CPU y disco.
+1. Archivos y descargas HTTP se transmiten a disco temporal; la API exige `Content-Length` para cargas multipart.
+2. Límite de entrada: 100 MiB; máximo de 5 trabajos pendientes; un upload multipart procesándose a la vez.
+3. Un worker y una conversión simultánea.
+4. Límite de salida: 50 MiB por resultado; máximo agregado de 2 GiB en resultados pendientes de descarga; expiración de 1.440 minutos.
+5. Timeout de conversión: 900 segundos. La cola llena devuelve un error controlado (`429`/`503`).
+6. Los límites están configurados mediante variables de entorno en `packages/markitdown-api/compose.yaml`.
+7. Carga por encima de 100 MiB no está soportada; aceptación de un tamaño no garantiza que cualquier formato complejo quepa en la memoria disponible.
 
 La categoría “todos los formatos” debe validarse contra las capacidades y dependencias reales de MarkItDown. Los extras `[all]`, herramientas del sistema, OCR y ciertas integraciones pueden aumentar el tamaño de la imagen o requerir servicios externos. No asumir que todos los formatos tienen conversión local equivalente.
 
@@ -112,31 +118,36 @@ Vigilar el crecimiento de registros indefinidos, índices, copias de seguridad y
 
 ## Cuentas, claves y facturación
 
-- Implementar una cuenta individual por cliente, autenticación, verificación/recuperación de acceso y autorización por propietario.
-- Permitir creación, rotación y revocación de claves API.
-- Registrar las métricas de consumo desde el inicio para evaluar si la unidad futura será conversiones, MB, páginas u otra.
-- No procesar pagos ni almacenar tarjetas en esta fase.
-- Mantener el registro de uso separado de la integración futura de pagos para poder incorporar un proveedor después de seleccionar países, moneda, planes y unidad de cobro.
+- Implementado: cuenta individual, verificación de correo, login con token de sesión, recuperación de contraseña y gestión de claves API.
+- Las claves API se entregan una sola vez, se almacenan como HMAC y se envían en `X-API-Key`; las sesiones usan `Authorization: Bearer`.
+- Hay un máximo de 20 claves activas por cuenta. Restablecer una contraseña revoca las claves y cambia la versión de sesión.
+- `GET /v1/usage` devuelve registros paginados; no procesa pagos ni almacena tarjetas.
+- El proveedor de pagos, países, moneda y unidad facturable siguen pendientes.
 
 ## OCR y servicios externos
 
-- Definir una interfaz/adaptador para OCR y proveedores como Azure.
-- Mantener esas capacidades apagadas por defecto; habilitarlas explícitamente por solicitud.
-- Configurar credenciales como secretos de Dokploy/entorno, nunca en el repositorio ni en la base de datos.
-- Registrar el proveedor y el estado de la integración, no el documento enviado.
-- Documentar que habilitar un proveedor externo puede enviar contenido fuera de la VPS y evaluar costes, latencia y tratamiento del documento antes de activarlo.
+- Implementado mediante el plugin OCR de MarkItDown con Azure OpenAI/OpenAI-compatible.
+- Se habilita por conversión (`ocr=true`) y falla con `ocr_provider_not_configured` si faltan secretos; por defecto está apagado.
+- Secretos en Dokploy: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_MODEL`.
+- Habilitar OCR envía imágenes de documentos al endpoint configurado; confirmar consentimiento, coste y privacidad antes de hacerlo por cliente.
 
-## Fases de trabajo
+## Estado de fases y siguiente trabajo
 
-1. **Diseño e inventario:** definir formatos incluidos, dependencias, límites, esquema de estados y comportamiento de descarga.
-2. **API y contratos:** crear la aplicación, autenticación inicial, validación y endpoints versionados.
-3. **Cola y worker:** añadir procesamiento asíncrono, concurrencia 1, límites, cancelación y manejo de errores.
-4. **Almacenamiento efímero:** carga/descarga en streaming, caducidad a 24 horas, eliminación después de descarga completa y limpieza de huérfanos.
-5. **Conversión por URL:** implementar descarga segura con mitigaciones SSRF y límite de 100 MB.
-6. **Cuentas y métricas:** implementar cuentas individuales, claves API y almacenamiento indefinido de métricas sin contenido documental.
-7. **Integraciones opcionales:** preparar adaptadores OCR/Azure apagados por defecto y configuración segura de secretos.
-8. **Contenedores y Dokploy:** separar servicios en Compose, exponer solo API, configurar recursos y proxy, health checks y secretos.
-9. **Pruebas y publicación:** pruebas funcionales, seguridad, limpieza, carga y operación; iniciar con cola/concurrencia conservadoras y ajustar según mediciones.
+1. **Implementado:** API versionada, auth, conversión por archivo y URL, cola, worker, límites y retención.
+2. **Implementado:** Compose para Dokploy, servicio público `api:8000`, Redis/PostgreSQL/worker internos y healthchecks.
+3. **Implementado:** tests funcionales y de conversión; el CI tiene un job `api-tests`.
+4. **Pendiente antes de escala:** realizar benchmark con formatos y tamaños representativos en la VPS; no hacerlo desde un entorno local si la instrucción activa del usuario lo prohíbe.
+5. **Pendiente de producción:** establecer backups/restauración de PostgreSQL, migraciones versionadas (hoy el arranque usa `metadata.create_all`), políticas de anonimización/cierre de cuenta y abuso de alta frecuencia en registro/reset.
+6. **Pendiente posterior:** seleccionar proveedor de pagos y unidad de cobro, sin almacenar datos de tarjeta.
+
+## Procedimiento operativo Dokploy
+
+- El Compose debe apuntar a `packages/markitdown-api/compose.yaml` en la raíz del checkout del repositorio `experiencIA-consulting/markitdown`.
+- El dominio debe seleccionar `serviceName=api`, puerto interno `8000`, path `/`; nunca seleccionar `worker`.
+- Para 404, comparar `compose.getConvertedCompose` con `docker.getConfig` del contenedor vivo: la conversión debe tener labels Traefik y `dokploy-network`.
+- Después de cambiar dominios/rutas, redeploy Compose para recrear contenedores con los labels. Healthchecks confirmados: `/health/live` y `/health/ready`.
+- El flujo API usa `POST /v1/accounts` → verificar correo → `POST /v1/auth/token` → `POST /v1/api-keys`; ver ejemplos en `packages/markitdown-api/README.md`.
+- Errores observados históricamente: Nixpacks no correspondía a este monorepo; `composePath` incorrecto causaba “Compose file not found”; volumen PostgreSQL persistente puede conservar una contraseña anterior aunque `POSTGRES_PASSWORD` cambie en Dokploy. No borrar volúmenes para resolver auth DB sin confirmar pérdida de datos; sincronizar el rol en PostgreSQL de forma segura.
 
 ## Criterios de aceptación
 
@@ -157,3 +168,45 @@ Vigilar el crecimiento de registros indefinidos, índices, copias de seguridad y
 - Decidir si se requiere acuse explícito del cliente para considerar completa la descarga.
 - Confirmar la lista exacta de formatos/extras locales y proveedores OCR/Azure a soportar.
 - Establecer política de anonimización de métricas si se cierra una cuenta.
+
+## Plan de mejoras: validación de formatos y límites de memoria
+
+### Objetivo
+
+Reducir el riesgo de aceptar archivos cuyo contenido no corresponda con el formato declarado y de que conversiones complejas agoten la memoria de la VPS. No prometer que cualquier archivo de hasta 100 MiB podrá convertirse correctamente.
+
+### 1. Validación del contenido de entrada
+
+- Inventariar los formatos que realmente soportan los conversores y dependencias instalados; no inferir soporte sólo por la extensión.
+- Revisar `packages/markitdown-api/src/markitdown_api/storage.py`, `worker.py` y la configuración de formatos. El flujo actual normaliza extensiones, pero no parece realizar una validación propia completa de firma/tipo antes de convertir; confirmar esto al implementar.
+- Añadir detección del contenido: validar firmas y estructura básica para formatos binarios; inspeccionar de forma acotada contenedores como ZIP; aplicar validaciones conservadoras a formatos de texto. La extensión y el MIME del cliente no son prueba suficiente.
+- Rechazar formatos no admitidos y discrepancias claras con errores públicos estables, por ejemplo `unsupported_media_type` o `file_type_mismatch`.
+- Aplicar la misma validación a archivos cargados y descargados desde URL, antes de encolar la conversión.
+- Limitar la inspección de contenedores (número de entradas y tamaño expandido) para reducir el riesgo de bombas ZIP.
+
+**Pruebas:** archivos válidos, extensión falsificada, contenido aleatorio o truncado, contenedores malformados, nombres engañosos y formatos con firmas ambiguas o compartidas.
+
+### 2. Aislamiento y presupuesto de recursos de conversión
+
+- Revisar `packages/markitdown-api/src/markitdown_api/worker.py`, `config.py` y `compose.yaml`; medir primero memoria máxima, duración y tamaño de salida con documentos representativos.
+- Mantener la API separada del worker, con un worker y concurrencia 1 en la VPS actual.
+- Definir límites configurables de memoria, CPU y tiempo. Al excederlos, terminar la conversión de forma controlada, registrar un error público como `resource_limit_exceeded` y permitir que el worker continúe.
+- Evaluar aislamiento por proceso y límites del sistema operativo/contendor para que una conversión problemática no deje bloqueado el worker. Confirmar el comportamiento real ante OOM en Docker antes de fijar la estrategia.
+- Verificar el máximo de salida antes de persistir el resultado y limpiar archivos parciales si se supera. Este límite de salida **no limita por sí solo la memoria de conversión**.
+- En el flujo actual, el conversor materializa el Markdown en memoria antes de comprobar el tamaño. No asumir streaming acotado; una garantía estricta requiere limitar/aislar el proceso de conversión y probar el comportamiento de OOM.
+- Asegurar limpieza de temporales y estados consistentes tras timeout, error, terminación del proceso o reinicio del worker.
+
+### 3. Validación operativa y despliegue
+
+- Probar documentos representativos, casos de expansión elevada, resultados grandes, timeout y agotamiento de recursos en un entorno controlado; mantener la concurrencia actual.
+- Comprobar que un fallo no deja temporales y que el worker puede procesar trabajos posteriores.
+- Registrar métricas operativas de memoria máxima, duración, fallos por categoría y uso de almacenamiento temporal, sin registrar contenido de documentos ni Markdown.
+- Desplegar con límites conservadores y ajustarlos sólo con mediciones en la VPS. No ejecutar benchmarks locales si una instrucción activa del usuario lo prohíbe.
+
+### Criterios de aceptación
+
+- Cargas y URLs pasan por la misma validación antes de la conversión; extensión/MIME por sí solos no bastan para aceptar el archivo.
+- Tipos no soportados, discrepancias claras, entradas malformadas y contenedores excesivos se rechazan de forma controlada.
+- Una conversión que excede el presupuesto falla sin bloquear permanentemente el worker ni dejar temporales o resultados parciales.
+- Resultados mayores al máximo configurado no se conservan ni se ofrecen para descarga.
+- Las pruebas documentan memoria, CPU, disco, duración y fallos; aceptar el límite de entrada de 100 MiB no implica garantía de conversión para todo formato o documento.

@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import json
 import logging
 import multiprocessing
@@ -8,14 +9,15 @@ import threading
 import time
 from datetime import timedelta
 from pathlib import Path
-from uuid import uuid4
 
+import psutil
 from markitdown import MarkItDown, StreamInfo, UnsupportedFormatException
 from redis import Redis
 from sqlalchemy import delete, func, or_, select, update
 
 from .config import Settings, get_settings
 from .db import SessionLocal, initialize_database
+from .input_validation import InputValidationError, validate_input_file
 from .job_queue import HEARTBEAT_KEY, PROCESSING_NAME, QUEUE_NAME
 from .models import AccountToken, Conversion, utcnow
 from .storage import (
@@ -46,12 +48,20 @@ def _convert_in_child(
     extension: str | None,
     result_file: str,
     max_output_bytes: int,
+    max_archive_entries: int,
+    max_archive_expanded_bytes: int,
     ocr: bool,
     settings_values: dict,
 ) -> None:
     try:
         if os.name != "nt":
             os.setsid()
+        extension = validate_input_file(
+            Path(file_path),
+            extension,
+            max_archive_entries=max_archive_entries,
+            max_archive_expanded_bytes=max_archive_expanded_bytes,
+        )
         client = None
         if ocr:
             from openai import AzureOpenAI
@@ -69,7 +79,6 @@ def _convert_in_child(
         stream_info = StreamInfo(extension=extension, filename=Path(file_path).name)
         result = converter.convert_local(file_path, stream_info=stream_info)
         markdown = result.markdown
-        output_bytes = len(markdown.encode("utf-8"))
         output_chars = len(markdown)
         page_count = None
         if extension == ".pdf":
@@ -80,7 +89,10 @@ def _convert_in_child(
                     page_count = len(pdf.pages)
             except Exception:  # noqa: BLE001
                 page_count = None
-        if output_bytes > max_output_bytes:
+        output_bytes, result_too_large = _write_limited_markdown(
+            markdown, Path(result_file), max_output_bytes
+        )
+        if result_too_large:
             send_pipe.send(
                 {
                     "ok": False,
@@ -88,27 +100,21 @@ def _convert_in_child(
                     "chars": output_chars,
                     "bytes": output_bytes,
                     "pages": page_count,
+                    "extension": extension,
                 }
             )
             return
-
-        destination = Path(result_file)
-        temporary = destination.with_name(f".{uuid4().hex}.part")
-        try:
-            with temporary.open("x", encoding="utf-8", newline="") as output:
-                output.write(markdown)
-                output.flush()
-            temporary.replace(destination)
-        finally:
-            temporary.unlink(missing_ok=True)
         send_pipe.send(
             {
                 "ok": True,
                 "chars": output_chars,
                 "bytes": output_bytes,
                 "pages": page_count,
+                "extension": extension,
             }
         )
+    except InputValidationError as exc:
+        send_pipe.send({"ok": False, "error": exc.code})
     except UnsupportedFormatException:
         send_pipe.send({"ok": False, "error": "unsupported_format"})
     except Exception as exc:  # noqa: BLE001
@@ -117,6 +123,39 @@ def _convert_in_child(
         send_pipe.send({"ok": False, "error": "conversion_failed"})
     finally:
         send_pipe.close()
+
+
+def _write_limited_markdown(
+    markdown: str, destination: Path, max_output_bytes: int
+) -> tuple[int, bool]:
+    """Write UTF-8 in bounded chunks without allocating a second full-size copy."""
+    temporary = destination.with_name(f".{destination.stem}.part")
+    total_bytes = 0
+    too_large = False
+    encoder = codecs.getincrementalencoder("utf-8")()
+    try:
+        with temporary.open("xb") as output:
+            for start in range(0, len(markdown), 64 * 1024):
+                encoded = encoder.encode(markdown[start : start + 64 * 1024])
+                total_bytes += len(encoded)
+                if not too_large and total_bytes <= max_output_bytes:
+                    output.write(encoded)
+                else:
+                    too_large = True
+            final_bytes = encoder.encode("", final=True)
+            total_bytes += len(final_bytes)
+            if not too_large and total_bytes <= max_output_bytes:
+                output.write(final_bytes)
+            else:
+                too_large = True
+            if too_large:
+                return total_bytes, True
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(destination)
+        return total_bytes, False
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _run_conversion(
@@ -142,15 +181,37 @@ def _run_conversion(
             extension,
             str(result_path(settings, conversion.id)),
             settings.max_output_bytes,
+            settings.max_archive_entries,
+            settings.max_archive_expanded_bytes,
             ocr,
             values,
         ),
         daemon=True,
     )
+    temporary_result = result_path(settings, conversion.id).with_name(
+        f".{conversion.id}.part"
+    )
+    temporary_result.unlink(missing_ok=True)
+    result_path(settings, conversion.id).unlink(missing_ok=True)
     process.start()
     send_pipe.close()
-    process.join(settings.conversion_timeout_seconds)
-    if process.is_alive():
+    deadline = time.monotonic() + settings.conversion_timeout_seconds
+    error = None
+    while process.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            error = "conversion_timeout"
+            break
+        process.join(min(0.25, remaining))
+        if process.is_alive():
+            try:
+                resident_bytes = psutil.Process(process.pid).memory_info().rss
+            except psutil.NoSuchProcess:
+                continue
+            if resident_bytes > settings.max_conversion_memory_bytes:
+                error = "resource_limit_exceeded"
+                break
+    if error:
         if os.name != "nt":
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -169,11 +230,32 @@ def _run_conversion(
         if process.is_alive():
             process.join()
         receive_pipe.close()
-        return {"ok": False, "error": "conversion_timeout"}
+        temporary_result.unlink(missing_ok=True)
+        result_path(settings, conversion.id).unlink(missing_ok=True)
+        return {"ok": False, "error": error}
+    if os.name != "nt" and process.exitcode == -getattr(signal, "SIGKILL", 9):
+        temporary_result.unlink(missing_ok=True)
+        result_path(settings, conversion.id).unlink(missing_ok=True)
+        receive_pipe.close()
+        return {"ok": False, "error": "resource_limit_exceeded"}
     try:
         if receive_pipe.poll(1):
-            return receive_pipe.recv()
-        return {"ok": False, "error": "conversion_failed"}
+            result = receive_pipe.recv()
+        else:
+            result = {"ok": False, "error": "conversion_failed"}
+        if not result.get("ok"):
+            temporary_result.unlink(missing_ok=True)
+            result_path(settings, conversion.id).unlink(missing_ok=True)
+        return result
+    except EOFError:
+        temporary_result.unlink(missing_ok=True)
+        result_path(settings, conversion.id).unlink(missing_ok=True)
+        error = (
+            "resource_limit_exceeded"
+            if os.name != "nt" and process.exitcode == -getattr(signal, "SIGKILL", 9)
+            else "conversion_failed"
+        )
+        return {"ok": False, "error": error}
     finally:
         receive_pipe.close()
 
@@ -253,6 +335,9 @@ async def _process_job(settings: Settings, job: dict) -> None:
                 duration_ms,
             )
             return
+
+        if result.get("extension"):
+            _update_conversion(conversion_id, input_extension=result["extension"])
 
         with SessionLocal() as db:
             stored_bytes = db.scalar(

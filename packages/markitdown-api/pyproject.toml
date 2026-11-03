@@ -15,7 +15,9 @@ dependencies = [
   "psycopg[binary]>=3.2,<4",
   "redis>=5,<7",
   "aiohttp>=3.11,<4",
+  "magika>=0.6.1,<2",
   "markitdown>=0.1.9,<0.2.0",
+  "psutil>=6,<8",
 ]
 
 [project.optional-dependencies]

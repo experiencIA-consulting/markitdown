@@ -151,6 +151,27 @@ def test_account_key_conversion_ownership_and_usage(monkeypatch):
         assert converted.status_code == 200
         assert converted.text == "hello upload"
 
+        mismatched = client.post(
+            "/v1/conversions",
+            headers={"X-API-Key": api_key},
+            files={"file": ("not-a-pdf.txt", b"%PDF-1.7\nnot text", "text/plain")},
+        )
+        assert mismatched.status_code == 202
+        mismatched_id = mismatched.json()["id"]
+        mismatched_job = next(
+            json.loads(raw)
+            for raw in fake_redis.queues[QUEUE_NAME]
+            if json.loads(raw).get("conversion_id") == mismatched_id
+        )
+        asyncio.run(_process_job(main.get_settings(), mismatched_job))
+        rejected = client.get(
+            f"/v1/conversions/{mismatched_id}", headers={"X-API-Key": api_key}
+        )
+        assert rejected.json()["status"] == "failed"
+        assert rejected.json()["error_code"] == "file_type_mismatch"
+        assert not main.input_path(main.get_settings(), mismatched_id).exists()
+        assert not main.result_path(main.get_settings(), mismatched_id).exists()
+
         second = client.post(
             "/v1/accounts",
             json={

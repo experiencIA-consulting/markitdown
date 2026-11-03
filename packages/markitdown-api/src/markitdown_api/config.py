@@ -24,6 +24,9 @@ class Settings:
     max_pending_jobs: int
     max_output_bytes: int
     max_stored_result_bytes: int
+    max_conversion_memory_bytes: int
+    max_archive_entries: int
+    max_archive_expanded_bytes: int
     result_ttl_minutes: int
     conversion_timeout_seconds: int
     rate_limit_per_minute: int
@@ -88,9 +91,14 @@ class Settings:
         if (
             self.max_output_bytes <= 0
             or self.max_stored_result_bytes <= 0
+            or self.max_conversion_memory_bytes <= 0
+            or self.max_archive_entries <= 0
+            or self.max_archive_expanded_bytes <= 0
             or self.conversion_timeout_seconds <= 0
         ):
-            raise RuntimeError("Output and conversion timeout limits must be positive")
+            raise RuntimeError(
+                "Output, archive, memory and timeout limits must be positive"
+            )
         if self.rate_limit_per_minute <= 0:
             raise RuntimeError("RATE_LIMIT_PER_MINUTE must be positive")
 
@@ -111,6 +119,13 @@ def get_settings() -> Settings:
         max_output_bytes=int(os.getenv("MAX_OUTPUT_BYTES", str(50 * 1024 * 1024))),
         max_stored_result_bytes=int(
             os.getenv("MAX_STORED_RESULT_BYTES", str(2 * 1024 * 1024 * 1024))
+        ),
+        max_conversion_memory_bytes=int(
+            os.getenv("MAX_CONVERSION_MEMORY_BYTES", str(512 * 1024 * 1024))
+        ),
+        max_archive_entries=int(os.getenv("MAX_ARCHIVE_ENTRIES", "5000")),
+        max_archive_expanded_bytes=int(
+            os.getenv("MAX_ARCHIVE_EXPANDED_BYTES", str(128 * 1024 * 1024))
         ),
         result_ttl_minutes=int(os.getenv("RESULT_TTL_MINUTES", "1440")),
         conversion_timeout_seconds=int(os.getenv("CONVERSION_TIMEOUT_SECONDS", "900")),

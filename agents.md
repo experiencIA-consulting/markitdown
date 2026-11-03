@@ -169,44 +169,25 @@ Vigilar el crecimiento de registros indefinidos, índices, copias de seguridad y
 - Confirmar la lista exacta de formatos/extras locales y proveedores OCR/Azure a soportar.
 - Establecer política de anonimización de métricas si se cierra una cuenta.
 
-## Plan de mejoras: validación de formatos y límites de memoria
+## Mejoras implementadas: validación de formatos y límites de memoria
 
-### Objetivo
+Implementación local en `packages/markitdown-api/`; **todavía no desplegada ni medida en la VPS**. Mantener un worker y una conversión simultánea.
 
-Reducir el riesgo de aceptar archivos cuyo contenido no corresponda con el formato declarado y de que conversiones complejas agoten la memoria de la VPS. No prometer que cualquier archivo de hasta 100 MiB podrá convertirse correctamente.
+### Validación de entradas
 
-### 1. Validación del contenido de entrada
+- `src/markitdown_api/input_validation.py` clasifica el contenido con Magika y compara el tipo detectado con una lista de extensiones soportadas por la imagen actual. Rechaza formatos no admitidos, discrepancias claras y contenido no clasificable con `unsupported_format`, `file_type_mismatch` o `invalid_file_content`.
+- Valida la cabecera PDF, reconoce ZIP/Office Open XML/EPUB y limita contenedores con `MAX_ARCHIVE_ENTRIES` (predeterminado 5.000) y `MAX_ARCHIVE_EXPANDED_BYTES` (128 MiB). Estos límites no equivalen a análisis antivirus.
+- Se ejecuta en el subprocess del worker antes de MarkItDown, tanto para archivos cargados como descargados desde URL. Por el contrato asíncrono, la solicitud puede responder `202`; una entrada inválida después queda como trabajo `failed` con su `error_code`. Se hace así para no cargar el modelo Magika en el proceso API limitado a 256 MiB.
+- Si el nombre no tiene extensión, se infiere una extensión admitida cuando Magika puede identificarla. Mantener `SUPPORTED_EXTENSIONS` alineado con los conversores/dependencias instalados; no representa automáticamente todos los formatos opcionales de MarkItDown.
 
-- Inventariar los formatos que realmente soportan los conversores y dependencias instalados; no inferir soporte sólo por la extensión.
-- Revisar `packages/markitdown-api/src/markitdown_api/storage.py`, `worker.py` y la configuración de formatos. El flujo actual normaliza extensiones, pero no parece realizar una validación propia completa de firma/tipo antes de convertir; confirmar esto al implementar.
-- Añadir detección del contenido: validar firmas y estructura básica para formatos binarios; inspeccionar de forma acotada contenedores como ZIP; aplicar validaciones conservadoras a formatos de texto. La extensión y el MIME del cliente no son prueba suficiente.
-- Rechazar formatos no admitidos y discrepancias claras con errores públicos estables, por ejemplo `unsupported_media_type` o `file_type_mismatch`.
-- Aplicar la misma validación a archivos cargados y descargados desde URL, antes de encolar la conversión.
-- Limitar la inspección de contenedores (número de entradas y tamaño expandido) para reducir el riesgo de bombas ZIP.
+### Recursos y resultados
 
-**Pruebas:** archivos válidos, extensión falsificada, contenido aleatorio o truncado, contenedores malformados, nombres engañosos y formatos con firmas ambiguas o compartidas.
+- El worker mide el RSS de su subprocess y lo termina si supera `MAX_CONVERSION_MEMORY_BYTES` (predeterminado 512 MiB), reportando `resource_limit_exceeded`; conserva el timeout existente de 900 segundos. El worker en Compose queda limitado por `WORKER_MEMORY_LIMIT` (768 MiB) y `WORKER_CPUS` (1 CPU). El límite del contenedor es el respaldo ante memoria de procesos descendientes o picos entre sondeos; un OOM que mate el worker completo aún requiere validación operativa.
+- Markdown se escribe en bloques UTF-8 de 64 KiB y se descarta si supera `MAX_OUTPUT_BYTES` (50 MiB). Esto evita crear una segunda copia completa codificada y elimina temporales parciales. **MarkItDown todavía materializa el Markdown completo en memoria antes de aplicar el límite de salida**; el límite RSS es el control para ese pico, no streaming de conversión.
+- Variables nuevas configurables en Compose y documentadas en `.env.example`: `MAX_CONVERSION_MEMORY_BYTES`, `MAX_ARCHIVE_ENTRIES`, `MAX_ARCHIVE_EXPANDED_BYTES`.
 
-### 2. Aislamiento y presupuesto de recursos de conversión
+### Verificación y pendientes
 
-- Revisar `packages/markitdown-api/src/markitdown_api/worker.py`, `config.py` y `compose.yaml`; medir primero memoria máxima, duración y tamaño de salida con documentos representativos.
-- Mantener la API separada del worker, con un worker y concurrencia 1 en la VPS actual.
-- Definir límites configurables de memoria, CPU y tiempo. Al excederlos, terminar la conversión de forma controlada, registrar un error público como `resource_limit_exceeded` y permitir que el worker continúe.
-- Evaluar aislamiento por proceso y límites del sistema operativo/contendor para que una conversión problemática no deje bloqueado el worker. Confirmar el comportamiento real ante OOM en Docker antes de fijar la estrategia.
-- Verificar el máximo de salida antes de persistir el resultado y limpiar archivos parciales si se supera. Este límite de salida **no limita por sí solo la memoria de conversión**.
-- En el flujo actual, el conversor materializa el Markdown en memoria antes de comprobar el tamaño. No asumir streaming acotado; una garantía estricta requiere limitar/aislar el proceso de conversión y probar el comportamiento de OOM.
-- Asegurar limpieza de temporales y estados consistentes tras timeout, error, terminación del proceso o reinicio del worker.
-
-### 3. Validación operativa y despliegue
-
-- Probar documentos representativos, casos de expansión elevada, resultados grandes, timeout y agotamiento de recursos en un entorno controlado; mantener la concurrencia actual.
-- Comprobar que un fallo no deja temporales y que el worker puede procesar trabajos posteriores.
-- Registrar métricas operativas de memoria máxima, duración, fallos por categoría y uso de almacenamiento temporal, sin registrar contenido de documentos ni Markdown.
-- Desplegar con límites conservadores y ajustarlos sólo con mediciones en la VPS. No ejecutar benchmarks locales si una instrucción activa del usuario lo prohíbe.
-
-### Criterios de aceptación
-
-- Cargas y URLs pasan por la misma validación antes de la conversión; extensión/MIME por sí solos no bastan para aceptar el archivo.
-- Tipos no soportados, discrepancias claras, entradas malformadas y contenedores excesivos se rechazan de forma controlada.
-- Una conversión que excede el presupuesto falla sin bloquear permanentemente el worker ni dejar temporales o resultados parciales.
-- Resultados mayores al máximo configurado no se conservan ni se ofrecen para descarga.
-- Las pruebas documentan memoria, CPU, disco, duración y fallos; aceptar el límite de entrada de 100 MiB no implica garantía de conversión para todo formato o documento.
+- Pruebas locales del paquete API: `27 passed`. Ruff y Black pasan; el YAML de Compose parsea. No se probó el build Docker (sin daemon en este entorno), ni se desplegó o ejecutó benchmark en Dokploy/VPS.
+- Antes de escalar: probar formatos/tamaños representativos en la VPS, observar memoria/CPU y confirmar que el OOM mata el subprocess sin reiniciar o reencolar indefinidamente el worker. No aumentar concurrencia hasta medir.
+- Aceptar hasta 100 MiB de entrada no garantiza conversión para todo documento. La validación de formato tampoco es análisis de malware ni garantía de seguridad del parser.

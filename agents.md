@@ -2,7 +2,14 @@
 
 ## Objetivo
 
-Publicar MarkItDown como una API REST para convertir archivos y URLs a Markdown, con cuentas individuales, claves API y registro de consumo. El despliegue inicial será en una VPS Ubuntu mediante Docker Compose en Dokploy. Este documento describe el plan; no implica que la API ya esté implementada.
+Publicar MarkItDown como una API REST para convertir archivos y URLs a Markdown, con cuentas individuales, claves API y registro de consumo. El despliegue inicial será en una VPS Ubuntu mediante Docker Compose en Dokploy.
+
+## Estado de implementación
+
+- Implementación inicial en `packages/markitdown-api/`: aplicación FastAPI, worker, almacenamiento temporal, modelo de datos, Compose, Dockerfile, documentación y pruebas.
+- Los pagos no están integrados. SMTP debe configurarse para habilitar el registro con verificación de correo (activado por defecto).
+- OCR usa el plugin de MarkItDown con Azure OpenAI cuando se solicita explícitamente y las credenciales están presentes; por defecto no se invoca.
+- El deployment Compose inicial es de una sola instancia API, un worker, concurrencia 1 y cola acotada. Se debe medir carga en la VPS antes de subir límites.
 
 ## Requisitos acordados
 
@@ -51,7 +58,8 @@ Con 2 GB de RAM, se recomienda un worker con concurrencia 1. Redis y PostgreSQL 
 
 ## Contrato inicial de API
 
-- `POST /v1/conversions`: recibe un archivo multipart o una URL y responde `202 Accepted` con el ID del trabajo.
+- `POST /v1/conversions`: recibe un archivo multipart y responde `202 Accepted` con el ID del trabajo.
+- `POST /v1/conversions/from-url`: recibe una URL pública y responde `202 Accepted` con el ID del trabajo.
 - `GET /v1/conversions/{id}`: devuelve el estado y errores públicos del trabajo.
 - `GET /v1/conversions/{id}/result`: entrega el Markdown solo al propietario del trabajo.
 - Endpoints de cuenta y claves API para registro/autenticación, rotación y revocación.

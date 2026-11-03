@@ -1,0 +1,116 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: packages/markitdown-api/Dockerfile
+    restart: unless-stopped
+    environment: &app-environment
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-markitdown}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-markitdown}
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET to a random secret of at least 32 characters}
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?Set API_KEY_PEPPER to a different random secret of at least 32 characters}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?Set PUBLIC_BASE_URL to the public HTTPS URL}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-104857600}
+      MAX_PENDING_JOBS: ${MAX_PENDING_JOBS:-5}
+      MAX_OUTPUT_BYTES: ${MAX_OUTPUT_BYTES:-52428800}
+      MAX_STORED_RESULT_BYTES: ${MAX_STORED_RESULT_BYTES:-2147483648}
+      RESULT_TTL_MINUTES: ${RESULT_TTL_MINUTES:-1440}
+      CONVERSION_TIMEOUT_SECONDS: ${CONVERSION_TIMEOUT_SECONDS:-900}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-true}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
+      AZURE_OPENAI_MODEL: ${AZURE_OPENAI_MODEL:-}
+    expose:
+      - "8000"
+    volumes:
+      - conversion-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: packages/markitdown-api/Dockerfile
+    command: ["python", "-m", "markitdown_api.worker"]
+    init: true
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-markitdown}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-markitdown}
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_DIR: /data
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-104857600}
+      MAX_PENDING_JOBS: ${MAX_PENDING_JOBS:-5}
+      MAX_OUTPUT_BYTES: ${MAX_OUTPUT_BYTES:-52428800}
+      MAX_STORED_RESULT_BYTES: ${MAX_STORED_RESULT_BYTES:-2147483648}
+      RESULT_TTL_MINUTES: ${RESULT_TTL_MINUTES:-1440}
+      CONVERSION_TIMEOUT_SECONDS: ${CONVERSION_TIMEOUT_SECONDS:-900}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
+      AZURE_OPENAI_MODEL: ${AZURE_OPENAI_MODEL:-}
+    volumes:
+      - conversion-data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 768m
+    stop_grace_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb", "--maxmemory-policy", "noeviction"]
+    expose:
+      - "6379"
+    mem_limit: 96m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-markitdown}
+      POSTGRES_USER: ${POSTGRES_USER:-markitdown}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    command: ["postgres", "-c", "shared_buffers=96MB", "-c", "max_connections=30"]
+    expose:
+      - "5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    mem_limit: 320m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-markitdown} -d ${POSTGRES_DB:-markitdown}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  conversion-data:
+  postgres-data:

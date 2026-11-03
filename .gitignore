@@ -127,6 +127,8 @@ celerybeat.pid
 # Environments
 .env
 .venv
+packages/markitdown-api/data/
+packages/markitdown-api/*.db
 env/
 venv/
 ENV/

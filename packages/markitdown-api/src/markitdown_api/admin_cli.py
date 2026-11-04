@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import re
+import smtplib
 from datetime import timedelta
 from uuid import uuid4
 
@@ -49,15 +50,21 @@ def bootstrap_admin(email: str) -> None:
         db.commit()
 
     link = f"{settings.public_base_url}/accept-invitation#token={token}"
-    asyncio.run(
-        asyncio.to_thread(
-            send_account_email,
-            settings,
-            email,
-            "Invitación de administrador a MarkItDown",
-            f"Completa tu cuenta de administrador: {link}",
+    try:
+        asyncio.run(
+            asyncio.to_thread(
+                send_account_email,
+                settings,
+                email,
+                "Invitación de administrador a MarkItDown",
+                f"Completa tu cuenta de administrador: {link}",
+            )
         )
-    )
+    except (OSError, TimeoutError, smtplib.SMTPException) as exc:
+        print(f"No se pudo enviar el correo de invitación ({type(exc).__name__}).")
+        print("El enlace de invitación sigue siendo válido durante 7 días:")
+        print(link)
+        return
     print("Administrator invitation sent; it expires in 7 days.")
 
 

@@ -40,6 +40,7 @@ class Settings:
     smtp_password: str
     smtp_from: str
     smtp_starttls: bool
+    smtp_ssl: bool
     azure_openai_api_key: str
     azure_openai_endpoint: str
     azure_openai_api_version: str
@@ -146,6 +147,7 @@ def get_settings() -> Settings:
         smtp_password=os.getenv("SMTP_PASSWORD", ""),
         smtp_from=os.getenv("SMTP_FROM", ""),
         smtp_starttls=_bool("SMTP_STARTTLS", True),
+        smtp_ssl=_bool("SMTP_SSL", False),
         azure_openai_api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
         azure_openai_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
         azure_openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),

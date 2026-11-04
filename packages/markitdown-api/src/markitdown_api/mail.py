@@ -16,9 +16,22 @@ def send_account_email(
         f"Abre este enlace para continuar: {link}\n\nSi no solicitaste esta acción, ignora este mensaje."
     )
 
+    context = ssl.create_default_context()
+    if settings.smtp_ssl or settings.smtp_port == 465:
+        with smtplib.SMTP_SSL(
+            settings.smtp_host,
+            settings.smtp_port,
+            timeout=15,
+            context=context,
+        ) as client:
+            if settings.smtp_username:
+                client.login(settings.smtp_username, settings.smtp_password)
+            client.send_message(message)
+        return
+
     with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=15) as client:
         if settings.smtp_starttls:
-            client.starttls(context=ssl.create_default_context())
+            client.starttls(context=context)
         if settings.smtp_username:
             client.login(settings.smtp_username, settings.smtp_password)
         client.send_message(message)

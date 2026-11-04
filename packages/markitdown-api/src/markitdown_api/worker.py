@@ -118,11 +118,15 @@ def _convert_in_child(
         )
         stream_info = StreamInfo(extension=extension, filename=Path(file_path).name)
         markdown = None
-        if extension == ".pdf" and not ocr:
+        if (
+            extension == ".pdf"
+            and not ocr
+            and settings_values.get("pdf_engine") == "pymupdf4llm"
+        ):
             try:
                 import pymupdf4llm
 
-                markdown = pymupdf4llm.to_markdown(file_path)
+                markdown = pymupdf4llm.to_markdown(file_path, use_ocr=False)
             except Exception:  # noqa: BLE001
                 markdown = None
         if not markdown or not markdown.strip():
@@ -240,6 +244,7 @@ def _run_conversion(
         "azure_openai_endpoint": settings.azure_openai_endpoint,
         "azure_openai_api_version": settings.azure_openai_api_version,
         "azure_openai_model": settings.azure_openai_model,
+        "pdf_engine": settings.pdf_engine,
     }
     process = context.Process(
         target=_convert_in_child,

@@ -33,6 +33,7 @@ class Settings:
     rate_limit_per_minute: int
     quota_timezone: str
     public_signup_enabled: bool
+    pdf_engine: str
     email_verification_required: bool
     smtp_host: str
     smtp_port: int
@@ -105,6 +106,8 @@ class Settings:
             )
         if self.rate_limit_per_minute <= 0:
             raise RuntimeError("RATE_LIMIT_PER_MINUTE must be positive")
+        if self.pdf_engine not in {"pymupdf4llm", "markitdown"}:
+            raise RuntimeError("PDF_ENGINE must be 'pymupdf4llm' or 'markitdown'")
         try:
             ZoneInfo(self.quota_timezone)
         except ZoneInfoNotFoundError as exc:
@@ -140,6 +143,7 @@ def get_settings() -> Settings:
         rate_limit_per_minute=int(os.getenv("RATE_LIMIT_PER_MINUTE", "30")),
         quota_timezone=os.getenv("QUOTA_TIMEZONE", "America/Mazatlan"),
         public_signup_enabled=_bool("PUBLIC_SIGNUP_ENABLED", False),
+        pdf_engine=os.getenv("PDF_ENGINE", "pymupdf4llm").strip().lower(),
         email_verification_required=_bool("EMAIL_VERIFICATION_REQUIRED", True),
         smtp_host=os.getenv("SMTP_HOST", ""),
         smtp_port=int(os.getenv("SMTP_PORT", "587")),

@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
-    "commit": "d15d2d1f14016144327acbbde1c1ae4c3b182990",
-    "indexed_at": "2026-11-04T17:12:03Z",
+    "commit": "7765d7bab324917be3b40b1459db0a6364b2c24b",
+    "indexed_at": "2026-11-04T17:22:41Z",
     "project": "markitdown",
-    "nodes": 2413,
-    "edges": 11891,
+    "nodes": 2416,
+    "edges": 11894,
     "original_size": 9306112,
-    "compressed_size": 1915053,
+    "compressed_size": 1915653,
     "compression_level": 9
 }

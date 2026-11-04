@@ -21,12 +21,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
 
 from . import __version__
+from .admin_api import router as admin_router
 from .auth import Principal, get_db, require_api_principal, require_session_account
 from .config import Settings, get_settings
 from .db import SessionLocal, initialize_database
+from .entitlements import get_quota_snapshot, quota_exceeded
 from .job_queue import HEARTBEAT_KEY, enqueue
 from .mail import send_account_email
 from .models import Account, AccountToken, ApiKey, Conversion, utcnow
+from .profile_api import router as profile_router
+from .reports_api import public_router as public_plans_router
+from .reports_api import router as reports_router
 from .security import (
     create_access_token,
     generate_account_token,
@@ -45,6 +50,7 @@ from .storage import (
     save_upload,
 )
 from .url_fetcher import UnsafeURL, validate_url_syntax
+from .web_auth import router as web_auth_router
 
 
 @asynccontextmanager
@@ -71,6 +77,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="MarkItDown Conversion API", version=__version__, lifespan=lifespan)
 logger = logging.getLogger("markitdown_api")
 _DUMMY_PASSWORD_HASH = hash_password("dummy-password-used-for-timing-equalization")
+
+app.include_router(web_auth_router)
+app.include_router(profile_router)
+app.include_router(admin_router)
+app.include_router(reports_router)
+app.include_router(public_plans_router)
 
 
 @app.middleware("http")
@@ -257,6 +269,8 @@ async def create_account(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
+    if not settings.public_signup_enabled:
+        raise HTTPException(status_code=403, detail="public_signup_disabled")
     email = payload.email.strip().lower()
     await _enforce_identity_limit(request, email, "signup", 3, 3600)
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
@@ -269,6 +283,9 @@ async def create_account(
         id=uuid4().hex,
         email=email,
         password_hash=await asyncio.to_thread(hash_password, payload.password),
+        session_version=0,
+        role="user",
+        is_active=True,
         verified_at=None if settings.email_verification_required else utcnow(),
     )
     db.add(account)
@@ -341,6 +358,8 @@ async def login(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
+    if not settings.public_signup_enabled:
+        raise HTTPException(status_code=403, detail="public_signup_disabled")
     email = payload.email.strip().lower()
     await _enforce_identity_limit(request, email, "login", 10, 60)
     account = db.scalar(select(Account).where(Account.email == email))
@@ -350,7 +369,7 @@ async def login(
     password_valid = await asyncio.to_thread(
         verify_password, payload.password, password_hash
     )
-    if account is None or not password_valid:
+    if account is None or not account.is_active or not password_valid:
         raise HTTPException(status_code=401, detail="invalid_credentials")
     if settings.email_verification_required and account.verified_at is None:
         raise HTTPException(status_code=403, detail="email_verification_required")
@@ -554,9 +573,16 @@ def usage(
     }
 
 
-async def _check_ocr(ocr: bool, settings: Settings) -> None:
-    if ocr and not settings.ocr_configured:
+def _check_ocr(ocr: bool, snapshot, settings: Settings) -> None:
+    if not ocr:
+        return
+    if not snapshot.limits["ocr_enabled"]:
+        raise HTTPException(status_code=403, detail="ocr_not_in_plan")
+    if not settings.ocr_configured:
         raise HTTPException(status_code=503, detail="ocr_provider_not_configured")
+    limit = snapshot.limits["max_ocr_units_month"]
+    if limit is not None and snapshot.usage["ocr_units"] >= limit:
+        raise HTTPException(status_code=429, detail="monthly_ocr_quota_exceeded")
 
 
 async def _enqueue_job(
@@ -578,7 +604,9 @@ async def _enqueue_job(
         raise HTTPException(status_code=status, detail=conversion.error_code)
 
 
-async def _receive_upload(request: Request, settings: Settings):
+async def _receive_upload(
+    request: Request, settings: Settings, max_file_bytes: int, snapshot
+):
     content_length = request.headers.get("content-length")
     if content_length is None:
         raise HTTPException(status_code=411, detail="content_length_required")
@@ -586,7 +614,8 @@ async def _receive_upload(request: Request, settings: Settings):
         request_bytes = int(content_length)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid_content_length") from None
-    if request_bytes > settings.max_upload_bytes + 1024 * 1024:
+    request_limit = min(settings.max_upload_bytes, max_file_bytes)
+    if request_bytes > request_limit + 1024 * 1024:
         raise HTTPException(status_code=413, detail="file_too_large")
     if "multipart/form-data" not in request.headers.get("content-type", "").lower():
         raise HTTPException(status_code=415, detail="multipart_form_required")
@@ -613,7 +642,7 @@ async def _receive_upload(request: Request, settings: Settings):
             if ocr_value not in {"true", "false", "1", "0"}:
                 raise HTTPException(status_code=422, detail="invalid_ocr_flag")
             ocr = ocr_value in {"true", "1"}
-            await _check_ocr(ocr, settings)
+            _check_ocr(ocr, snapshot, settings)
             conversion_id = uuid4().hex
             extension = safe_extension(upload.filename or "")
             try:
@@ -621,7 +650,7 @@ async def _receive_upload(request: Request, settings: Settings):
                     save_upload,
                     upload.file,
                     input_path(settings, conversion_id),
-                    settings.max_upload_bytes,
+                    max_file_bytes,
                 )
             except ValueError as exc:
                 if str(exc) == "file_too_large":
@@ -661,11 +690,29 @@ async def create_upload_conversion(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
+    snapshot = get_quota_snapshot(db, principal.account_id, settings)
+    if principal.role != "admin" and not snapshot.plan_configured:
+        raise HTTPException(status_code=403, detail="plan_not_configured")
     await _enforce_rate_limit(
-        _redis(request), principal.account_id, settings.rate_limit_per_minute
+        _redis(request),
+        principal.account_id,
+        int(snapshot.limits["requests_per_minute"] or settings.rate_limit_per_minute),
     )
+    if quota_exceeded(snapshot, "max_conversions_month", additional=1):
+        raise HTTPException(status_code=429, detail="monthly_conversion_quota_exceeded")
+    if quota_exceeded(snapshot, "max_pages_month", additional=1):
+        raise HTTPException(status_code=429, detail="monthly_page_quota_exceeded")
+    monthly_byte_limit = snapshot.limits["max_input_bytes_month"]
+    if (
+        monthly_byte_limit is not None
+        and snapshot.usage["input_bytes"] >= monthly_byte_limit
+    ):
+        raise HTTPException(
+            status_code=429, detail="monthly_input_bytes_quota_exceeded"
+        )
+    max_file_bytes = int(snapshot.limits["max_file_bytes"] or settings.max_upload_bytes)
     conversion_id, extension, input_bytes, ocr = await _receive_upload(
-        request, settings
+        request, settings, max_file_bytes, snapshot
     )
 
     conversion = Conversion(
@@ -679,6 +726,22 @@ async def create_upload_conversion(
         external_provider="azure_openai" if ocr else None,
     )
     db.add(conversion)
+    db.flush()
+    current_snapshot = get_quota_snapshot(db, principal.account_id, settings)
+    current_byte_limit = current_snapshot.limits["max_input_bytes_month"]
+    if (
+        current_byte_limit is not None
+        and current_snapshot.usage["input_bytes"] > current_byte_limit
+    ):
+        conversion.status = "failed"
+        conversion.error_code = "monthly_input_bytes_quota_exceeded"
+        conversion.completed_at = utcnow()
+        conversion.duration_ms = 0
+        db.commit()
+        remove_input(settings, conversion_id)
+        raise HTTPException(
+            status_code=429, detail="monthly_input_bytes_quota_exceeded"
+        )
     db.commit()
     await _enqueue_job(
         request,
@@ -708,15 +771,38 @@ async def create_url_conversion(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    await _check_ocr(payload.ocr, settings)
+    snapshot = get_quota_snapshot(db, principal.account_id, settings)
+    if principal.role != "admin" and not snapshot.plan_configured:
+        raise HTTPException(status_code=403, detail="plan_not_configured")
+    redis = _redis(request)
+    await _enforce_rate_limit(
+        redis,
+        principal.account_id,
+        int(snapshot.limits["requests_per_minute"] or settings.rate_limit_per_minute),
+    )
+    _check_ocr(payload.ocr, snapshot, settings)
     try:
         validate_url_syntax(payload.url)
     except UnsafeURL as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    redis = _redis(request)
-    await _enforce_rate_limit(
-        redis, principal.account_id, settings.rate_limit_per_minute
+    if quota_exceeded(snapshot, "max_conversions_month", additional=1):
+        raise HTTPException(status_code=429, detail="monthly_conversion_quota_exceeded")
+    if quota_exceeded(snapshot, "max_pages_month", additional=1):
+        raise HTTPException(status_code=429, detail="monthly_page_quota_exceeded")
+    monthly_byte_limit = snapshot.limits["max_input_bytes_month"]
+    if (
+        monthly_byte_limit is not None
+        and snapshot.usage["input_bytes"] >= monthly_byte_limit
+    ):
+        raise HTTPException(
+            status_code=429, detail="monthly_input_bytes_quota_exceeded"
+        )
+    remaining_bytes = (
+        int(monthly_byte_limit) - snapshot.usage["input_bytes"]
+        if monthly_byte_limit is not None
+        else settings.max_upload_bytes
     )
+    max_file_bytes = int(snapshot.limits["max_file_bytes"] or settings.max_upload_bytes)
     conversion_id = uuid4().hex
     conversion = Conversion(
         id=conversion_id,
@@ -737,6 +823,14 @@ async def create_url_conversion(
             "source_type": "url",
             "url": payload.url,
             "ocr": payload.ocr,
+            "max_input_bytes": min(
+                max_file_bytes, remaining_bytes, settings.max_upload_bytes
+            ),
+            "input_limit_error": (
+                "monthly_input_bytes_quota_exceeded"
+                if monthly_byte_limit is not None and remaining_bytes < max_file_bytes
+                else "file_too_large"
+            ),
         },
         settings,
     )

@@ -7,8 +7,18 @@ REST API and background worker for converting files and public HTTP(S) URLs with
 1. Copy `.env.example` to `.env` in this directory and replace `JWT_SECRET`, `API_KEY_PEPPER`, and `POSTGRES_PASSWORD` with different random URL-safe values (for example, `python -c "import secrets; print(secrets.token_hex(32))"`). Do not commit `.env`.
 2. Set `PUBLIC_BASE_URL` to the HTTPS domain assigned to the `api` service in Dokploy.
 3. Configure SMTP (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and, when required, credentials). Email verification is required by default; the API refuses startup if it is enabled without SMTP configuration.
-4. In Dokploy, deploy `packages/markitdown-api/compose.yaml`, build from the repository root context, route the domain to the `api` service on port `8000`, and set secrets as Dokploy environment variables.
-5. Verify `/health/live` and `/health/ready` after deployment.
+4. In Dokploy, deploy `packages/markitdown-api/compose.yaml`, build from the repository root context, route the domain to the `admin-web` service on port `80`, and set secrets as Dokploy environment variables. `admin-web` serves the SPA and proxies `/v1/*`, `/health/*` and the email landing pages to `api:8000`.
+5. Verify `/health/live` and `/health/ready` after deployment. The API also applies Alembic migrations automatically at startup.
+6. Provision the first administrator once the containers are healthy:
+
+```bash
+docker compose -f packages/markitdown-api/compose.yaml exec api \
+  python -m markitdown_api.admin_cli bootstrap-admin admin@example.com
+```
+
+The command sends an invitation to `/accept-invitation`, where the administrator sets a password. If the email already exists, it promotes that account to `admin` instead.
+
+The SPA is available at `/login`, `/dashboard`, `/convert`, `/plans`, `/users`, `/reports/consumption` and `/profile`. Public registration is disabled by default (`PUBLIC_SIGNUP_ENABLED=false`); users must be invited from the administration panel. Web sessions use secure `HttpOnly` cookies plus `X-CSRF-Token`; API clients continue to use `X-API-Key`.
 
 For local Compose, run from the repository root:
 
@@ -17,7 +27,7 @@ docker compose --env-file packages/markitdown-api/.env \
   -f packages/markitdown-api/compose.yaml up --build
 ```
 
-The Compose file exposes only the API to Dokploy's internal proxy. PostgreSQL and Redis have no published host ports. Redis intentionally has no disk persistence because queued URL payloads can contain sensitive query parameters; if Redis is lost, the worker marks unrecoverable jobs failed. The shared conversion volume is temporary application storage and should not be included in backups. Back up PostgreSQL because usage records are retained indefinitely.
+The Compose file exposes only the `admin-web` gateway to Dokploy's internal proxy. PostgreSQL and Redis have no published host ports. Redis intentionally has no disk persistence because queued URL payloads can contain sensitive query parameters; if Redis is lost, the worker marks unrecoverable jobs failed. The shared conversion volume is temporary application storage and should not be included in backups. Back up PostgreSQL because usage records are retained indefinitely.
 
 Run package tests from the repository root after installing the package and test extras:
 
@@ -34,13 +44,26 @@ Before conversion, the worker classifies file content with Magika, checks the de
 
 ## Account and API-key flow
 
-1. `POST /v1/accounts` with `{"email":"...","password":"at-least-12-chars"}`.
-2. Open the verification link delivered by SMTP and confirm it, or call `POST /v1/accounts/verify` with `{"token":"..."}`.
-3. `POST /v1/auth/token` with email/password to receive a one-hour account access token.
-4. Use that token as `Authorization: Bearer <access_token>` for key management. `POST /v1/api-keys` returns a new API key once; list/revoke keys at `GET/DELETE /v1/api-keys`.
-5. Use `X-API-Key: <api-key>` for conversion and usage endpoints.
+Public registration is disabled by default. Administrators invite users from `/users`; the invitation expires in seven days and lands on `/accept-invitation`, where the user sets a password. `POST /v1/accounts` remains available for API-only registration only when `PUBLIC_SIGNUP_ENABLED=true`.
+
+1. `POST /v1/web-auth/login` with `{"email":"...","password":"..."}` establishes the web session (same-origin cookies) and returns the CSRF token used by the SPA.
+2. Use `Authorization: Bearer <access_token>` from `POST /v1/auth/token` for API token flows, or `X-API-Key` from `POST /v1/api-keys` for conversion endpoints.
+3. `GET /v1/account/me`, `PATCH /v1/account/me` and `POST /v1/account/password` manage the signed-in profile. A password change revokes API keys and invalidates the web session.
 
 Password reset starts with `POST /v1/accounts/password-reset`; the email link opens a confirmation page, or an API client can submit the token and new password to `POST /v1/accounts/password-reset/confirm`. Resetting a password revokes existing API keys. No payment processing is included.
+
+## Plans, quotas and administration
+
+The catalog is seeded with Free, Pro weekly/monthly/annual, Lifetime and Business as informational tiers. Seeded plans are inactive until an administrator completes the quota matrix; activation requires conversions/month, input bytes/month, pages/month, requests/minute and file-size values. Paid-tier values must come from the benchmark, not estimates.
+
+- Monthly quotas reset at the start of the natural month in `QUOTA_TIMEZONE` (`America/Mazatlan` by default). Reports accept the browser IANA timezone.
+- Successful conversions consume one conversion and `quota_page_units` (real `page_count`, or 1 when page count is not reliable, including images). Failed conversions consume no conversion/page quota but always record processed input bytes and authenticated requests/minute.
+- OCR consumes units only when an image/page is actually sent to the provider. OCR must be enabled by the active plan and requested per conversion.
+- Business is an individual account in this version; organizations/members are not implemented.
+- Admin endpoints: `/v1/admin/overview`, `/v1/admin/users`, `/v1/admin/users/{id}`, `/v1/admin/plans`, `/v1/admin/plans/{id}`, `/v1/admin/reports/consumption` and `/v1/admin/reports/consumption.csv`. Only accounts with `role=admin` can use them.
+- `GET /v1/plans` exposes only active plans for the informational catalog.
+
+If no plan is active, non-admin conversions fail with `plan_not_configured`. This is intentional until quotas are approved; administrators may still test with global limits.
 
 ## Conversion API
 
@@ -77,6 +100,6 @@ The image includes the optional MarkItDown OCR plugin and OpenAI-compatible clie
 
 - Configure email deliverability and add suitable abuse controls for account registration and password reset at the edge.
 - Select and test the exact format extras and Azure deployment/model; “all formats” depends on upstream optional dependencies and external credentials.
-- Add schema migrations and an operational backup/restore procedure before changing the database schema or relying on indefinite records.
+- Add an operational PostgreSQL backup/restore procedure and test a restore before relying on indefinite records.
 - Decide account deletion/anonymization behavior for indefinitely retained usage records.
-- Establish measured throughput and resource sizing for the intended workload.
+- Establish measured throughput and resource sizing for the intended workload, then finish paid-tier quotas.

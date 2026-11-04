@@ -17,9 +17,10 @@ from sqlalchemy import delete, func, or_, select, update
 
 from .config import Settings, get_settings
 from .db import SessionLocal, initialize_database
+from .entitlements import get_quota_snapshot, quota_exceeded
 from .input_validation import InputValidationError, validate_input_file
 from .job_queue import HEARTBEAT_KEY, PROCESSING_NAME, QUEUE_NAME
-from .models import AccountToken, Conversion, utcnow
+from .models import Account, AccountToken, Conversion, utcnow
 from .storage import (
     ensure_storage,
     input_path,
@@ -31,6 +32,39 @@ from .storage import (
 from .url_fetcher import DownloadTooLarge, UnsafeURL, download_public_url
 
 logger = logging.getLogger("markitdown_api.worker")
+
+
+class _CountingCompletions:
+    def __init__(self, completions, counter, limit_reached, limit: int | None):
+        self._completions = completions
+        self._counter = counter
+        self._limit_reached = limit_reached
+        self._limit = limit
+
+    def create(self, *args, **kwargs):
+        with self._counter.get_lock():
+            if self._limit is not None and self._counter.value >= self._limit:
+                self._limit_reached.value = True
+                raise RuntimeError("ocr_quota_exceeded")
+            self._counter.value += 1
+        return self._completions.create(*args, **kwargs)
+
+
+class _CountingClient:
+    def __init__(self, client, counter, limit_reached, limit: int | None):
+        self._client = client
+        self.chat = type(
+            "CountingChat",
+            (),
+            {
+                "completions": _CountingCompletions(
+                    client.chat.completions, counter, limit_reached, limit
+                )
+            },
+        )()
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
 
 
 def _heartbeat(redis: Redis, stop: threading.Event) -> None:
@@ -51,6 +85,9 @@ def _convert_in_child(
     max_archive_entries: int,
     max_archive_expanded_bytes: int,
     ocr: bool,
+    max_ocr_units: int | None,
+    ocr_counter,
+    ocr_limit_reached,
     settings_values: dict,
 ) -> None:
     try:
@@ -71,6 +108,9 @@ def _convert_in_child(
                 azure_endpoint=settings_values["azure_openai_endpoint"],
                 api_version=settings_values["azure_openai_api_version"],
             )
+            client = _CountingClient(
+                client, ocr_counter, ocr_limit_reached, max_ocr_units
+            )
         converter = MarkItDown(
             enable_plugins=ocr,
             llm_client=client,
@@ -89,6 +129,16 @@ def _convert_in_child(
                     page_count = len(pdf.pages)
             except Exception:  # noqa: BLE001
                 page_count = None
+        if ocr_limit_reached.value:
+            send_pipe.send(
+                {
+                    "ok": False,
+                    "error": "monthly_ocr_quota_exceeded",
+                    "pages": page_count,
+                    "ocr_units": ocr_counter.value,
+                }
+            )
+            return
         output_bytes, result_too_large = _write_limited_markdown(
             markdown, Path(result_file), max_output_bytes
         )
@@ -101,6 +151,7 @@ def _convert_in_child(
                     "bytes": output_bytes,
                     "pages": page_count,
                     "extension": extension,
+                    "ocr_units": ocr_counter.value,
                 }
             )
             return
@@ -111,16 +162,21 @@ def _convert_in_child(
                 "bytes": output_bytes,
                 "pages": page_count,
                 "extension": extension,
+                "ocr_units": ocr_counter.value,
             }
         )
     except InputValidationError as exc:
-        send_pipe.send({"ok": False, "error": exc.code})
+        send_pipe.send({"ok": False, "error": exc.code, "ocr_units": ocr_counter.value})
     except UnsupportedFormatException:
-        send_pipe.send({"ok": False, "error": "unsupported_format"})
+        send_pipe.send(
+            {"ok": False, "error": "unsupported_format", "ocr_units": ocr_counter.value}
+        )
     except Exception as exc:  # noqa: BLE001
         # Error text may contain document names, paths, URLs, or extracted data.
         logger.warning("Conversion subprocess failed (%s)", type(exc).__name__)
-        send_pipe.send({"ok": False, "error": "conversion_failed"})
+        send_pipe.send(
+            {"ok": False, "error": "conversion_failed", "ocr_units": ocr_counter.value}
+        )
     finally:
         send_pipe.close()
 
@@ -164,9 +220,12 @@ def _run_conversion(
     file_path: Path,
     extension: str | None,
     ocr: bool,
+    max_ocr_units: int | None,
 ) -> dict:
     context = multiprocessing.get_context("spawn")
     receive_pipe, send_pipe = context.Pipe(duplex=False)
+    ocr_counter = context.Value("i", 0)
+    ocr_limit_reached = context.Value("b", False)
     values = {
         "azure_openai_api_key": settings.azure_openai_api_key,
         "azure_openai_endpoint": settings.azure_openai_endpoint,
@@ -184,6 +243,9 @@ def _run_conversion(
             settings.max_archive_entries,
             settings.max_archive_expanded_bytes,
             ocr,
+            max_ocr_units,
+            ocr_counter,
+            ocr_limit_reached,
             values,
         ),
         daemon=True,
@@ -232,17 +294,22 @@ def _run_conversion(
         receive_pipe.close()
         temporary_result.unlink(missing_ok=True)
         result_path(settings, conversion.id).unlink(missing_ok=True)
-        return {"ok": False, "error": error}
+        return {"ok": False, "error": error, "ocr_units": int(ocr_counter.value)}
     if os.name != "nt" and process.exitcode == -getattr(signal, "SIGKILL", 9):
         temporary_result.unlink(missing_ok=True)
         result_path(settings, conversion.id).unlink(missing_ok=True)
         receive_pipe.close()
-        return {"ok": False, "error": "resource_limit_exceeded"}
+        return {
+            "ok": False,
+            "error": "resource_limit_exceeded",
+            "ocr_units": int(ocr_counter.value),
+        }
     try:
         if receive_pipe.poll(1):
             result = receive_pipe.recv()
         else:
             result = {"ok": False, "error": "conversion_failed"}
+        result.setdefault("ocr_units", int(ocr_counter.value))
         if not result.get("ok"):
             temporary_result.unlink(missing_ok=True)
             result_path(settings, conversion.id).unlink(missing_ok=True)
@@ -255,7 +322,7 @@ def _run_conversion(
             if os.name != "nt" and process.exitcode == -getattr(signal, "SIGKILL", 9)
             else "conversion_failed"
         )
-        return {"ok": False, "error": error}
+        return {"ok": False, "error": error, "ocr_units": int(ocr_counter.value)}
     finally:
         receive_pipe.close()
 
@@ -279,6 +346,9 @@ async def _process_job(settings: Settings, job: dict) -> None:
         conversion = db.get(Conversion, conversion_id)
         if conversion is None or conversion.status not in {"queued", "running"}:
             return
+        account_id = conversion.account_id
+        account = db.get(Account, account_id)
+        account_role = account.role if account else "user"
         conversion.status = "running"
         conversion.started_at = conversion.started_at or utcnow()
         db.commit()
@@ -286,22 +356,81 @@ async def _process_job(settings: Settings, job: dict) -> None:
     started = time.monotonic()
     file_path = input_path(settings, conversion_id)
     extension = None
+    ocr_requested = bool(job.get("ocr"))
+    ocr_units = 0
     try:
+        snapshot = _quota_snapshot(account_id, settings)
+        if account_role != "admin" and not snapshot.plan_configured:
+            _fail(settings, conversion_id, "plan_not_configured", 0)
+            return
+        if quota_exceeded(snapshot, "max_conversions_month", additional=1):
+            _fail(settings, conversion_id, "monthly_conversion_quota_exceeded", 0)
+            return
+        if quota_exceeded(snapshot, "max_pages_month", additional=1):
+            _fail(settings, conversion_id, "monthly_page_quota_exceeded", 0)
+            return
+        byte_limit = snapshot.limits["max_input_bytes_month"]
+        if byte_limit is not None:
+            if snapshot.usage["input_bytes"] > byte_limit:
+                _fail(settings, conversion_id, "monthly_input_bytes_quota_exceeded", 0)
+                return
+            remaining_bytes = max(0, int(byte_limit) - snapshot.usage["input_bytes"])
+        else:
+            remaining_bytes = settings.max_upload_bytes
+        file_limit = int(snapshot.limits["max_file_bytes"] or settings.max_upload_bytes)
+        if ocr_requested and not snapshot.limits["ocr_enabled"]:
+            _fail(settings, conversion_id, "ocr_not_in_plan", 0)
+            return
+        ocr_limit = snapshot.limits["max_ocr_units_month"]
+        max_ocr_units = None
+        if ocr_requested and ocr_limit is not None:
+            max_ocr_units = max(0, int(ocr_limit) - snapshot.usage["ocr_units"])
+            if max_ocr_units == 0:
+                _fail(settings, conversion_id, "monthly_ocr_quota_exceeded", 0)
+                return
+
         source_type = job.get("source_type")
         if source_type == "url":
             url = job.get("url")
             if not isinstance(url, str):
                 raise ValueError("invalid_url")
+            if remaining_bytes <= 0:
+                _fail(settings, conversion_id, "monthly_input_bytes_quota_exceeded", 0)
+                return
+            download_limit = min(
+                int(job.get("max_input_bytes") or file_limit),
+                file_limit,
+                remaining_bytes,
+                settings.max_upload_bytes,
+            )
+            limit_error = str(job.get("input_limit_error") or "file_too_large")
             _downloaded_path, extension, input_bytes = await download_public_url(
-                settings, conversion_id, url
+                settings,
+                conversion_id,
+                url,
+                max_bytes=download_limit,
+                limit_error_code=limit_error,
             )
             _update_conversion(
                 conversion_id, input_extension=extension, input_bytes=input_bytes
             )
+            if (
+                byte_limit is not None
+                and snapshot.usage["input_bytes"] + input_bytes > byte_limit
+            ):
+                _fail(settings, conversion_id, "monthly_input_bytes_quota_exceeded", 0)
+                return
         elif source_type == "upload":
             with SessionLocal() as db:
                 conversion = db.get(Conversion, conversion_id)
                 extension = conversion.input_extension if conversion else None
+                input_bytes = conversion.input_bytes if conversion else 0
+            if input_bytes and input_bytes > file_limit:
+                _fail(settings, conversion_id, "file_too_large", 0)
+                return
+            if byte_limit is not None and snapshot.usage["input_bytes"] > byte_limit:
+                _fail(settings, conversion_id, "monthly_input_bytes_quota_exceeded", 0)
+                return
         else:
             raise ValueError("invalid_source")
 
@@ -313,8 +442,10 @@ async def _process_job(settings: Settings, job: dict) -> None:
             _get_conversion(conversion_id),
             file_path,
             extension,
-            bool(job.get("ocr")),
+            ocr_requested,
+            max_ocr_units,
         )
+        ocr_units = int(result.get("ocr_units", 0))
         duration_ms = int((time.monotonic() - started) * 1000)
         if not result.get("ok"):
             remove_result(settings, conversion_id)
@@ -323,6 +454,8 @@ async def _process_job(settings: Settings, job: dict) -> None:
                 status="failed",
                 error_code=result.get("error", "conversion_failed"),
                 page_count=result.get("pages"),
+                quota_page_units=0,
+                ocr_units=ocr_units,
                 output_char_count=result.get("chars"),
                 output_utf8_bytes=result.get("bytes"),
                 duration_ms=duration_ms,
@@ -339,6 +472,26 @@ async def _process_job(settings: Settings, job: dict) -> None:
         if result.get("extension"):
             _update_conversion(conversion_id, input_extension=result["extension"])
 
+        quota_page_units = max(1, int(result.get("pages") or 1))
+        completed_snapshot = _quota_snapshot(account_id, settings)
+        if quota_exceeded(
+            completed_snapshot, "max_pages_month", additional=quota_page_units
+        ):
+            remove_result(settings, conversion_id)
+            _update_conversion(
+                conversion_id,
+                status="failed",
+                error_code="monthly_page_quota_exceeded",
+                page_count=result.get("pages"),
+                quota_page_units=0,
+                ocr_units=ocr_units,
+                output_char_count=result["chars"],
+                output_utf8_bytes=result["bytes"],
+                duration_ms=duration_ms,
+                completed_at=utcnow(),
+            )
+            return
+
         with SessionLocal() as db:
             stored_bytes = db.scalar(
                 select(func.coalesce(func.sum(Conversion.output_utf8_bytes), 0)).where(
@@ -354,6 +507,8 @@ async def _process_job(settings: Settings, job: dict) -> None:
                 status="failed",
                 error_code="temporary_storage_limit",
                 page_count=result.get("pages"),
+                quota_page_units=0,
+                ocr_units=ocr_units,
                 output_char_count=result["chars"],
                 output_utf8_bytes=result["bytes"],
                 duration_ms=int((time.monotonic() - started) * 1000),
@@ -369,6 +524,8 @@ async def _process_job(settings: Settings, job: dict) -> None:
             conversion_id,
             status="succeeded",
             page_count=result.get("pages"),
+            quota_page_units=quota_page_units,
+            ocr_units=ocr_units,
             output_char_count=result["chars"],
             output_utf8_bytes=result["bytes"],
             duration_ms=duration_ms,
@@ -383,14 +540,21 @@ async def _process_job(settings: Settings, job: dict) -> None:
         )
     except UnsafeURL as exc:
         _fail(
-            settings, conversion_id, str(exc), int((time.monotonic() - started) * 1000)
+            settings,
+            conversion_id,
+            str(exc),
+            int((time.monotonic() - started) * 1000),
+            ocr_units,
         )
-    except DownloadTooLarge:
+    except DownloadTooLarge as exc:
+        if exc.bytes_read:
+            _update_conversion(conversion_id, input_bytes=exc.bytes_read)
         _fail(
             settings,
             conversion_id,
-            "file_too_large",
+            exc.error_code,
             int((time.monotonic() - started) * 1000),
+            ocr_units,
         )
     except ValueError as exc:
         code = (
@@ -410,7 +574,13 @@ async def _process_job(settings: Settings, job: dict) -> None:
             }
             else "conversion_failed"
         )
-        _fail(settings, conversion_id, code, int((time.monotonic() - started) * 1000))
+        _fail(
+            settings,
+            conversion_id,
+            code,
+            int((time.monotonic() - started) * 1000),
+            ocr_units,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Job %s failed (%s)", conversion_id, type(exc).__name__)
         _fail(
@@ -418,6 +588,7 @@ async def _process_job(settings: Settings, job: dict) -> None:
             conversion_id,
             "conversion_failed",
             int((time.monotonic() - started) * 1000),
+            ocr_units,
         )
     finally:
         remove_input(settings, conversion_id)
@@ -432,14 +603,25 @@ def _get_conversion(conversion_id: str) -> Conversion:
         return conversion
 
 
+def _quota_snapshot(account_id: str, settings: Settings):
+    with SessionLocal() as db:
+        return get_quota_snapshot(db, account_id, settings)
+
+
 def _fail(
-    settings: Settings, conversion_id: str, error_code: str, duration_ms: int
+    settings: Settings,
+    conversion_id: str,
+    error_code: str,
+    duration_ms: int,
+    ocr_units: int = 0,
 ) -> None:
     remove_result(settings, conversion_id)
     _update_conversion(
         conversion_id,
         status="failed",
         error_code=error_code,
+        quota_page_units=0,
+        ocr_units=ocr_units,
         duration_ms=duration_ms,
         completed_at=utcnow(),
     )

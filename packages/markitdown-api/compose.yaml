@@ -18,6 +18,8 @@ services:
       RESULT_TTL_MINUTES: ${RESULT_TTL_MINUTES:-1440}
       CONVERSION_TIMEOUT_SECONDS: ${CONVERSION_TIMEOUT_SECONDS:-900}
       RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      QUOTA_TIMEZONE: ${QUOTA_TIMEZONE:-America/Mazatlan}
+      PUBLIC_SIGNUP_ENABLED: ${PUBLIC_SIGNUP_ENABLED:-false}
       EMAIL_VERIFICATION_REQUIRED: ${EMAIL_VERIFICATION_REQUIRED:-true}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -66,6 +68,7 @@ services:
       MAX_ARCHIVE_EXPANDED_BYTES: ${MAX_ARCHIVE_EXPANDED_BYTES:-134217728}
       RESULT_TTL_MINUTES: ${RESULT_TTL_MINUTES:-1440}
       CONVERSION_TIMEOUT_SECONDS: ${CONVERSION_TIMEOUT_SECONDS:-900}
+      QUOTA_TIMEZONE: ${QUOTA_TIMEZONE:-America/Mazatlan}
       AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
       AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
@@ -82,6 +85,24 @@ services:
     mem_limit: ${WORKER_MEMORY_LIMIT:-768m}
     cpus: ${WORKER_CPUS:-1.0}
     stop_grace_period: 30s
+
+  admin-web:
+    build:
+      context: ../..
+      dockerfile: packages/markitdown-admin/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      api:
+        condition: service_healthy
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   redis:
     image: redis:7-alpine

@@ -26,6 +26,8 @@ def test_conversion_runs_in_bounded_child_process(tmp_path: Path):
         result_ttl_minutes=1440,
         conversion_timeout_seconds=60,
         rate_limit_per_minute=30,
+        quota_timezone="America/Mazatlan",
+        public_signup_enabled=False,
         email_verification_required=False,
         smtp_host="",
         smtp_port=587,
@@ -46,6 +48,7 @@ def test_conversion_runs_in_bounded_child_process(tmp_path: Path):
         input_file,
         ".txt",
         False,
+        None,
     )
 
     assert result["ok"] is True
@@ -67,9 +70,14 @@ def test_conversion_memory_budget_terminates_child(tmp_path: Path):
         input_file,
         ".txt",
         False,
+        None,
     )
 
-    assert result == {"ok": False, "error": "resource_limit_exceeded"}
+    assert result == {
+        "ok": False,
+        "error": "resource_limit_exceeded",
+        "ocr_units": 0,
+    }
 
 
 def test_limited_writer_counts_utf8_and_discards_oversized_result(tmp_path: Path):
@@ -102,6 +110,8 @@ def _settings(tmp_path: Path, *, max_conversion_memory_bytes: int) -> Settings:
         result_ttl_minutes=1440,
         conversion_timeout_seconds=60,
         rate_limit_per_minute=30,
+        quota_timezone="America/Mazatlan",
+        public_signup_enabled=False,
         email_verification_required=False,
         smtp_host="",
         smtp_port=587,

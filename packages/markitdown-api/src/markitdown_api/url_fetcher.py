@@ -18,7 +18,10 @@ class UnsafeURL(ValueError):
 
 
 class DownloadTooLarge(ValueError):
-    pass
+    def __init__(self, error_code: str = "file_too_large", bytes_read: int = 0):
+        super().__init__(error_code)
+        self.error_code = error_code
+        self.bytes_read = bytes_read
 
 
 def validate_url_syntax(url: str) -> None:
@@ -87,8 +90,14 @@ class PublicResolver(AbstractResolver):
 
 
 async def download_public_url(
-    settings: Settings, conversion_id: str, url: str
+    settings: Settings,
+    conversion_id: str,
+    url: str,
+    *,
+    max_bytes: int | None = None,
+    limit_error_code: str = "file_too_large",
 ) -> tuple[Path, str | None, int]:
+    byte_limit = min(settings.max_upload_bytes, max_bytes or settings.max_upload_bytes)
     validate_url_syntax(url)
     destination = input_path(settings, conversion_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -134,11 +143,8 @@ async def download_public_url(
                     if content_encoding not in {"", "identity"}:
                         raise ValueError("remote_content_encoding_not_supported")
                     content_length = response.content_length
-                    if (
-                        content_length is not None
-                        and content_length > settings.max_upload_bytes
-                    ):
-                        raise DownloadTooLarge("file_too_large")
+                    if content_length is not None and content_length > byte_limit:
+                        raise DownloadTooLarge(limit_error_code)
 
                     fd, temporary_name = tempfile.mkstemp(
                         prefix=f".{conversion_id}.",
@@ -149,8 +155,8 @@ async def download_public_url(
                     with os.fdopen(fd, "wb") as output:
                         async for chunk in response.content.iter_chunked(64 * 1024):
                             size += len(chunk)
-                            if size > settings.max_upload_bytes:
-                                raise DownloadTooLarge("file_too_large")
+                            if size > byte_limit:
+                                raise DownloadTooLarge(limit_error_code, size)
                             output.write(chunk)
                         output.flush()
                         os.fsync(output.fileno())

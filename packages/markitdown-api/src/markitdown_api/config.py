@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _bool(name: str, default: bool) -> bool:
@@ -30,6 +31,8 @@ class Settings:
     result_ttl_minutes: int
     conversion_timeout_seconds: int
     rate_limit_per_minute: int
+    quota_timezone: str
+    public_signup_enabled: bool
     email_verification_required: bool
     smtp_host: str
     smtp_port: int
@@ -101,6 +104,10 @@ class Settings:
             )
         if self.rate_limit_per_minute <= 0:
             raise RuntimeError("RATE_LIMIT_PER_MINUTE must be positive")
+        try:
+            ZoneInfo(self.quota_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise RuntimeError("QUOTA_TIMEZONE must be a valid IANA time zone") from exc
 
 
 @lru_cache(maxsize=1)
@@ -130,6 +137,8 @@ def get_settings() -> Settings:
         result_ttl_minutes=int(os.getenv("RESULT_TTL_MINUTES", "1440")),
         conversion_timeout_seconds=int(os.getenv("CONVERSION_TIMEOUT_SECONDS", "900")),
         rate_limit_per_minute=int(os.getenv("RATE_LIMIT_PER_MINUTE", "30")),
+        quota_timezone=os.getenv("QUOTA_TIMEZONE", "America/Mazatlan"),
+        public_signup_enabled=_bool("PUBLIC_SIGNUP_ENABLED", False),
         email_verification_required=_bool("EMAIL_VERIFICATION_REQUIRED", True),
         smtp_host=os.getenv("SMTP_HOST", ""),
         smtp_port=int(os.getenv("SMTP_PORT", "587")),

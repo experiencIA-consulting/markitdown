@@ -12,12 +12,15 @@ dependencies = [
   "uvicorn[standard]>=0.34,<1",
   "python-multipart>=0.0.20",
   "SQLAlchemy>=2.0,<3",
+  "alembic>=1.14,<2",
   "psycopg[binary]>=3.2,<4",
+  "alembic>=1.14,<2",
   "redis>=5,<7",
   "aiohttp>=3.11,<4",
   "magika>=0.6.1,<2",
   "markitdown>=0.1.9,<0.2.0",
   "psutil>=6,<8",
+  "tzdata>=2025.2",
 ]
 
 [project.optional-dependencies]

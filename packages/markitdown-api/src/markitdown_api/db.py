@@ -1,4 +1,8 @@
-from sqlalchemy import create_engine
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from .config import get_settings
@@ -22,6 +26,19 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def initialize_database() -> None:
-    from . import models  # noqa: F401
-
-    Base.metadata.create_all(bind=engine)
+    migration_dir = Path(__file__).parent / "migrations"
+    config = Config()
+    config.set_main_option("script_location", str(migration_dir))
+    config.set_main_option(
+        "sqlalchemy.url", get_settings().database_url.replace("%", "%%")
+    )
+    with engine.connect() as connection:
+        config.attributes["connection"] = connection
+        inspector = inspect(connection)
+        has_existing_api_schema = inspector.has_table("accounts")
+        has_version_table = inspector.has_table("alembic_version")
+        connection.commit()
+        if has_existing_api_schema and not has_version_table:
+            command.stamp(config, "0001_base")
+            connection.commit()
+        command.upgrade(config, "head")

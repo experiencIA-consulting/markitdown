@@ -11,13 +11,14 @@ os.environ["STORAGE_DIR"] = str(_TEST_ROOT / "data")
 os.environ["JWT_SECRET"] = "j" * 40
 os.environ["API_KEY_PEPPER"] = "p" * 40
 os.environ["EMAIL_VERIFICATION_REQUIRED"] = "false"
+os.environ["PUBLIC_SIGNUP_ENABLED"] = "true"
 os.environ["PUBLIC_BASE_URL"] = "http://testserver"
 
 from fastapi.testclient import TestClient
 
 from markitdown_api import main
 from markitdown_api.job_queue import QUEUE_NAME
-from markitdown_api.models import Account, Conversion, utcnow
+from markitdown_api.models import Account, Conversion, Plan, PlanAssignment, utcnow
 from markitdown_api.worker import _process_job
 
 
@@ -74,6 +75,32 @@ def test_account_key_conversion_ownership_and_usage(monkeypatch):
         first_data = first.json()
         api_key = first_data["api_key"]
         access_token = first_data["access_token"]
+
+        with main.SessionLocal() as db:
+            plan = Plan(
+                id="test-plan",
+                code="test_free",
+                name="Test plan",
+                billing_period="monthly",
+                is_active=True,
+                max_conversions_month=300,
+                max_input_bytes_month=100 * 1024 * 1024,
+                max_pages_month=300,
+                requests_per_minute=30,
+                max_file_bytes=10 * 1024 * 1024,
+                max_batch_files=1,
+                ocr_enabled=False,
+            )
+            db.add(plan)
+            db.add(
+                PlanAssignment(
+                    id="test-assignment",
+                    account_id=first_data["id"],
+                    plan_id=plan.id,
+                    starts_at=utcnow() - timedelta(minutes=1),
+                )
+            )
+            db.commit()
 
         login = client.post(
             "/v1/auth/token",

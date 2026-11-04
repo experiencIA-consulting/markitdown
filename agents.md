@@ -19,7 +19,7 @@ Este documento es el punto de partida para el siguiente agente. Describe la impl
 - El despliegue inicial usa una instancia API, un worker y una conversión simultánea. No aumentar concurrencia sin medir la VPS de 2 GB.
 - Los PDF sin OCR usan `pymupdf4llm==1.28.2` con `use_ocr=False`; MarkItDown queda como fallback. `PDF_ENGINE` permite cambiar el motor.
 - El error `resource_limit_exceeded` observado en un PDF se debió a que PyMuPDF4LLM activaba su OCR interno; se desactivó con `use_ocr=False`. El subproceso sigue limitado a 512 MiB y debe vigilarse.
-- El repositorio está indexado en Codebase Memory con el nombre `markitdown` (2.413 nodos y 11.891 relaciones). El artefacto `.codebase-memory/graph.db.zst` está generado pero no versionado.
+- El repositorio está indexado en Codebase Memory con el nombre `markitdown`. El artefacto `.codebase-memory/graph.db.zst` está versionado para que otros agentes puedan reutilizar el índice sin reindexar; `artifact.json` indica el commit y los conteos.
 - La última suite del paquete API conocida antes del portal/PDF fue `27 passed`; Black/Ruff pasan. El build del frontend (TypeScript + Vite) pasa. No se ha ejecutado la suite completa después de los últimos cambios de portal y PDF.
 
 ## Requisitos acordados
@@ -365,5 +365,5 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 3. Ejecutar benchmark en la VPS con PDFs/Office de distintos tamaños; documentar RSS, CPU y duración antes de aumentar workers o límites.
 4. Configurar backups y probar restauración de PostgreSQL.
 5. Decidir si se implementa un modo de salida PDF literal/verbatim y si se acepta la licencia AGPL/comercial de PyMuPDF4LLM.
-6. Revisar `.codebase-memory/graph.db.zst`: está generado y sin versionar; decidir si se ignora o se comparte.
+6. El artefacto `.codebase-memory/graph.db.zst` está versionado; si se reindexa, actualizar y commitear también `graph.db.zst` y `artifact.json` para que otros agentes bootstrapeen desde el índice compartido.
 7. No volver a ejecutar `bootstrap-admin` para el mismo correo sin comprobar antes la cuenta; el comando promueve y cambia la sesión.

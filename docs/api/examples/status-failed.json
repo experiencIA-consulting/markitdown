@@ -1,0 +1,10 @@
+{
+  "id": "4c1d0b9a8f7e6d5c4b3a29180f7e6d5c",
+  "status": "failed",
+  "error_code": "file_type_mismatch",
+  "created_at": "2026-11-04T17:10:02.331904Z",
+  "started_at": "2026-11-04T17:10:02.884517Z",
+  "completed_at": "2026-11-04T17:10:03.207663Z",
+  "result_expires_at": null,
+  "result_url": null
+}

@@ -1,0 +1,11 @@
+{
+  "detail": [
+    {
+      "type": "string_too_short",
+      "loc": ["body", "url"],
+      "msg": "String should have at least 8 characters",
+      "input": "nope",
+      "ctx": { "min_length": 8 }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+  "status": "succeeded",
+  "error_code": null,
+  "created_at": "2026-11-04T17:03:21.114820Z",
+  "started_at": "2026-11-04T17:03:21.902117Z",
+  "completed_at": "2026-11-04T17:03:24.558041Z",
+  "result_expires_at": "2026-11-05T17:03:24.558041Z",
+  "result_url": "/v1/conversions/9f8e7d6c5b4a39281706f5e4d3c2b1a0/result"
+}

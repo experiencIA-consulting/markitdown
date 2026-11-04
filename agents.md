@@ -367,7 +367,7 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 5. Decidir si se implementa un modo de salida PDF literal/verbatim y si se acepta la licencia AGPL/comercial de PyMuPDF4LLM.
 6. El artefacto `.codebase-memory/graph.db.zst` está versionado; si se reindexa, actualizar y commitear también `graph.db.zst` y `artifact.json` para que otros agentes bootstrapeen desde el índice compartido.
 7. No volver a ejecutar `bootstrap-admin` para el mismo correo sin comprobar antes la cuenta; el comando promueve y cambia la sesión.
-8. Publicar `docs/api/` y redesplegar el contrato de conversiones de `a026ffa`; el Swagger público aún muestra `schema: {}`. Ver “Plan registrado: contrato de integración para consumidores”.
+8. Redesplegar el contrato de conversiones de `a026ffa`; `docs/api/` ya está publicado en el repo, pero el Swagger público aún muestra `schema: {}`. Ver “Plan registrado: contrato de integración para consumidores”.
 
 ## Plan registrado: contrato de integración para consumidores
 
@@ -433,4 +433,22 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 
 ### Siguiente paso
 
-Ejecutar F1 y después F0. No crear endpoints nuevos ni tocar el contrato de ejecución para satisfacer esta solicitud.
+Ejecutar F0 (redeploy y verificación de `/openapi.json`). No crear endpoints nuevos ni tocar el contrato de ejecución para satisfacer esta solicitud.
+
+### Estado de F1 (completado, 2026-11-04)
+
+- **17 artefactos en `docs/api/`:** `README.md`, `markdown-result.md`, `conversion-lifecycle.md`, `errors.md`, `limits-and-formats.md`, `sandbox.md`, `openapi.consumer.json`, tres estados de ejemplo, `result.md`, `accepted-202.json` y cinco sobres de error.
+- `packages/markitdown-api/README.md` enlaza al paquete mediante “Integration contract for API consumers”.
+- **`.gitignore` corregido:** `/docs` pasó a `/docs/*` + `!/docs/api/`. Sin esto, `git add docs/api` fallaba y el contrato no podía versionarse; `docs/inicial.md` sigue ignorado.
+- **Verificación:** 10 JSON válidos con `json.tool`; snapshot OpenAPI 3.1 con 7 rutas (`/v1/conversions*`, `/v1/plans`, `/health/*`) y 5 esquemas, sin `/v1/admin/*`; los tres estados de ejemplo tienen exactamente las 8 claves del modelo; `git add -n docs/api` enumera los 17 archivos; sin `mk_live_`, correos, dominios internos ni documentos de clientes.
+- **Sin cambios de código de la API, sin despliegue y sin cuenta de pruebas.**
+- **Discrepancias plan/código documentadas (prevalece el código):**
+  - `409 conversion_not_ready` cubre cualquier estado distinto de `succeeded`, incluidos `failed` y `expired`; `410 result_unavailable` solo con `succeeded` ya consumido, reclamado, vencido o sin archivo.
+  - Un hostname que resuelve a IP no pública termina en `remote_fetch_failed`, no en `destination_not_public`; este último aparece con IP literal.
+  - `HEAD` en la descarga responde `405` con `Allow: GET`: no existe y no puede consumir.
+  - El ejemplo de `ConversionStatusResponse` generado por FastAPI omite `error_code` porque serializa los ejemplos con `exclude_none=True`; la respuesta real siempre trae las 8 claves (los ejemplos versionados lo muestran).
+  - `/v1/plans` y `/health/*` siguen con `schema: {}` en OpenAPI porque no declaran `response_model`.
+  - El `422` declarado en los dos `GET` es inalcanzable.
+  - Con `proxy_buffering` del gateway, la garantía de reintento por desconexión vale hasta que la API termina de escribir al gateway, no hasta el socket del cliente.
+  - `expired` cuenta como conversión y páginas en las cuotas (`SUCCESS_STATES`), y la cuota de páginas se revalida con las páginas reales tras el `202`.
+- **Pendiente único de F1/F0:** el redeploy. Mientras no se despliegue `a026ffa`, `/docs` y `/openapi.json` no coinciden con este paquete.

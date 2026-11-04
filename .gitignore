@@ -169,5 +169,7 @@ src/.DS_Store
 .DS_Store
 .cursorrules
 /.vs
-/docs
+# Upstream docs build is ignored, but the API integration contract is versioned.
+/docs/*
+!/docs/api/
 node_modules/

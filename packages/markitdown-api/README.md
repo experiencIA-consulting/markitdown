@@ -67,6 +67,14 @@ The catalog is seeded with Free, Pro weekly/monthly/annual, Lifetime and Busines
 
 If no plan is active, non-admin conversions fail with `plan_not_configured`. This is intentional until quotas are approved; administrators may still test with global limits.
 
+## Integration contract for API consumers
+
+The consumer-facing contract lives in `docs/api/` at the repository root: start with
+[`docs/api/README.md`](../../docs/api/README.md). It covers the exact shape of the Markdown result, the
+conversion lifecycle and one-time download, the error catalog, limits and formats, access under request,
+sanitized examples and a filtered `openapi.consumer.json`. It is documentation only; endpoints, auth and
+limits are the ones implemented here.
+
 ## Conversion API
 
 Conversion endpoints require an API key in the `X-API-Key` header. The upload endpoint accepts `multipart/form-data` with one required `file` part and an optional `ocr` boolean (defaults to `false`):

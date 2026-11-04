@@ -315,3 +315,9 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 - El dominio de Dokploy ya apunta a `admin-web:80`; API, worker, PostgreSQL, Redis y `admin-web` est?n activos y saludables.
 - Verificados remotamente `/health/live`, `/health/ready`, `/login`, `/docs` y `/v1/plans`. El build del frontend (TypeScript + Vite) pasa.
 - Pendiente operativo: provisionar el primer administrador, configurar SMTP si no est? listo, completar y activar el plan Free, y probar el flujo completo de invitaci?n y conversi?n con una cuenta real.
+
+### Mejora de extracci?n PDF
+
+- Los PDF sin OCR usan `pymupdf4llm==1.28.2` (PyMuPDF 1.28.2) como motor principal y conservan MarkItDown como fallback. Esto corrige tablas y espaciado que pdfminer/pdfplumber romp?an en documentos con fuentes incrustadas.
+- OCR sigue usando el plugin MarkItDown + Azure; PyMuPDF 1.28.2 cumple el rango `<2` del plugin OCR.
+- Revisar la licencia AGPL/comercial de PyMuPDF/PyMuPDF4LLM antes de una explotaci?n comercial p?blica.

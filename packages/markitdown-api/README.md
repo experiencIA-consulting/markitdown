@@ -42,6 +42,8 @@ The initial configuration uses one worker process and one conversion at a time, 
 
 Before conversion, the worker classifies file content with Magika, checks the declared extension against the detected type, validates PDF headers and inspects ZIP-based office/EPUB containers within the entry/expanded-size limits. This is input-format validation, not malware scanning or a guarantee that a document is safe to parse. Supported extensions remain tied to the MarkItDown formats installed in the image.
 
+PDFs without OCR use PyMuPDF4LLM first, which preserves table structure better than plain text extraction. If that engine fails or returns empty content, the worker falls back to the built-in MarkItDown PDF converter. OCR-enabled conversions continue through the MarkItDown OCR plugin. Review PyMuPDF/PyMuPDF4LLM licensing (AGPL/commercial) before a commercial launch.
+
 ## Account and API-key flow
 
 Public registration is disabled by default. Administrators invite users from `/users`; the invitation expires in seven days and lands on `/accept-invitation`, where the user sets a password. `POST /v1/accounts` remains available for API-only registration only when `PUBLIC_SIGNUP_ENABLED=true`.

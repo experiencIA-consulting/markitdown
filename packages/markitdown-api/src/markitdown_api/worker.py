@@ -117,8 +117,17 @@ def _convert_in_child(
             llm_model=settings_values["azure_openai_model"] if ocr else None,
         )
         stream_info = StreamInfo(extension=extension, filename=Path(file_path).name)
-        result = converter.convert_local(file_path, stream_info=stream_info)
-        markdown = result.markdown
+        markdown = None
+        if extension == ".pdf" and not ocr:
+            try:
+                import pymupdf4llm
+
+                markdown = pymupdf4llm.to_markdown(file_path)
+            except Exception:  # noqa: BLE001
+                markdown = None
+        if not markdown or not markdown.strip():
+            result = converter.convert_local(file_path, stream_info=stream_info)
+            markdown = result.markdown
         output_chars = len(markdown)
         page_count = None
         if extension == ".pdf":

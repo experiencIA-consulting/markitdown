@@ -20,6 +20,7 @@ dependencies = [
   "magika>=0.6.1,<2",
   "markitdown>=0.1.9,<0.2.0",
   "psutil>=6,<8",
+  "pymupdf4llm>=1.28.2,<2",
   "tzdata>=2025.2",
 ]
 

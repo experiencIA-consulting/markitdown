@@ -170,3 +170,4 @@ src/.DS_Store
 .cursorrules
 /.vs
 /docs
+node_modules/

@@ -52,7 +52,7 @@ function quotaValue(plan: Record<string, unknown>, key: string) {
   return undefined;
 }
 function quotaMatrix(plan: Record<string, unknown>) {
-  const missing = quotaFields.filter(([key]) => {
+  const missing: string[] = quotaFields.filter(([key]) => {
     const raw = quotaValue(plan, key);
     return raw === null || raw === undefined || raw === '' || !Number.isFinite(Number(raw)) || Number(raw) < 0;
   }).map(([key]) => key);
@@ -135,7 +135,7 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    api.me().then((data) => { if (active) setUser(('user' in (data as object) ? (data as { user?: User }).user : data) ?? null); })
+    api.me().then((data) => { if (active) setUser(('user' in (data as object) ? (data as { user?: User }).user : data as User) ?? null); })
       .catch((error) => { if (active) setAuthError(errText(error)); })
       .finally(() => { if (active) setAuthLoading(false); });
     return () => { active = false; };
@@ -175,6 +175,7 @@ function LoginPage({ onLogin, initialError }: { onLogin: (user: User) => void; i
     try {
       const result = await api.login(email.trim(), password);
       const user = result.user ?? await api.me().then((data) => ('user' in (data as object) ? (data as { user: User }).user : data as User));
+      if (!user) throw new Error('No se pudo cargar el perfil de la cuenta.');
       onLogin(user);
     } catch (e) { setError(errText(e)); } finally { setBusy(false); }
   };
@@ -362,7 +363,7 @@ function csvText(data: unknown): string {
 function ConvertPage({ user }: { user: User }) {
   const [mode, setMode] = useState<'file' | 'url'>('file'); const [file, setFile] = useState<File | null>(null); const [url, setUrl] = useState('');
   const [ocr, setOcr] = useState(false); const [consent, setConsent] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  const [job, setJob] = useState<Conversion | null>(null); const [markdown, setMarkdown] = useState<string | null>(null); const [resultError, setResultError] = useState(''); const [key, setKey] = useState(() => sessionStorage.getItem('markitdown-api-key') ?? '');
+  const [job, setJob] = useState<Conversion | null>(null); const [markdown, setMarkdown] = useState<string | null>(null); const [resultError, setResultError] = useState(''); const [key] = useState(() => sessionStorage.getItem('markitdown-api-key') ?? '');
   const freePlan = (typeof user.plan === 'string' ? user.plan : user.plan?.name ?? '').toLowerCase() === 'free';
   const catalogFileLimit = userFileLimit(user);
   const maxBytes = freePlan ? 10 * 1024 * 1024 : Math.min(catalogFileLimit?.bytes ?? 100 * 1024 * 1024, 100 * 1024 * 1024);
@@ -484,7 +485,7 @@ function CreateUserDialog({ plans, onClose, onCreated }: { plans: Plan[]; onClos
 function UserAccountDetails() {
   const { id = '' } = useParams(); const [user, setUser] = useState<User | null>(null); const [plans, setPlans] = useState<Plan[]>([]); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [saving, setSaving] = useState(false); const [notice, setNotice] = useState('');
   const [name, setName] = useState(''); const [plan, setPlan] = useState(''); const [role, setRole] = useState(''); const [status, setStatus] = useState('');
-  const load = useCallback(async () => { setLoading(true); setError(''); try { const [record, catalog] = await Promise.all([api.user(id), api.plans()]); const planOptions = records<Plan>(catalog); setUser(record); setName(record.name ?? record.display_name ?? ''); setPlan(typeof record.plan === 'string' ? planOptions.find((p) => p.id === record.plan || p.name === record.plan)?.id ?? record.plan : record.plan?.id ?? planOptions.find((p) => p.name === record.plan?.name)?.id ?? ''); setRole(record.role ?? record.roles?.[0] ?? 'user'); setStatus(record.status ?? (record.is_active === false ? 'inactive' : 'active')); setPlans(planOptions); } catch (e) { setError(errText(e)); } finally { setLoading(false); } }, [id]);
+  const load = useCallback(async () => { setLoading(true); setError(''); try { const [record, catalog] = await Promise.all([api.user(id), api.plans()]); const planOptions = records<Plan>(catalog); setUser(record); setName(record.name ?? record.display_name ?? ''); const recordPlan = record.plan; const selectedPlanId = typeof recordPlan === 'string' ? planOptions.find((p) => p.id === recordPlan || p.name === recordPlan)?.id ?? recordPlan : recordPlan?.id ?? planOptions.find((p) => p.name === recordPlan?.name)?.id ?? ''; setPlan(selectedPlanId); setRole(record.role ?? record.roles?.[0] ?? 'user'); setStatus(record.status ?? (record.is_active === false ? 'inactive' : 'active')); setPlans(planOptions); } catch (e) { setError(errText(e)); } finally { setLoading(false); } }, [id]);
   useEffect(() => { load(); }, [load]);
   const save = async (event: FormEvent) => { event.preventDefault(); if (!user) return; setSaving(true); setError(''); setNotice(''); try { const updated = await api.updateUser(id, { display_name: name.trim(), planId: plans.find((p) => p.id === plan)?.id, role, status }); setUser({ ...user, ...updated }); setNotice('Cambios guardados correctamente.'); } catch (e) { setError(errText(e)); } finally { setSaving(false); } };
   if (loading) return <Loading/>; if (error && !user) return <ErrorState error={error} retry={load}/>; if (!user) return null;
@@ -621,3 +622,5 @@ function ProfilePage({ user, onUserChange, onLogout }: { user: User; onUserChang
       <section className="panel keys-panel"><div className="panel-header"><div><h2>Claves API</h2><p>Las claves secretas solo se muestran una vez.</p></div><span className="secure-label"><Icon name="shield" size={15}/> Protegidas</span></div><form className="key-create" onSubmit={createKey}><label className="sr-only" htmlFor="key-name">Nombre de clave API</label><input id="key-name" value={keyName} onChange={(e) => setKeyName(e.target.value)} placeholder="Nombre de la clave (ej. Mi sitio web)"/><button className="button button-primary" disabled={busyKey}><Icon name="plus" size={16}/>{busyKey ? 'Creando…' : 'Crear clave'}</button></form>{newKey && <div className="new-key-callout"><div><strong>Guarda esta clave ahora</strong><p>Por seguridad no volverá a mostrarse. Se usará solo en memoria de esta pestaña para convertir.</p><code>{newKey}</code></div><button className="button button-secondary" onClick={activateKey}>Usar en esta pestaña</button></div>}{sessionKey && <div className="session-key-callout"><span className="status-badge badge-good"><i/> Clave de conversión configurada en esta pestaña</span><button className="text-button" onClick={() => { sessionStorage.removeItem('markitdown-api-key'); setSessionKey(''); }}>Quitar</button></div>}{keys.length ? <div className="key-list">{keys.map((item) => <div className="key-row" key={item.id}><span className="key-symbol"><Icon name="shield" size={16}/></span><div><strong>{item.name || 'Clave API'}</strong><small><code>{item.prefix ? `${item.prefix}••••••••` : '••••••••••••'}</code> · creada {dateLabel(item.createdAt ?? item.created_at)}</small></div><span className="key-last-used">{item.lastUsedAt || item.last_used_at ? `Usada ${dateLabel(item.lastUsedAt ?? item.last_used_at)}` : 'Sin uso registrado'}</span><button className="text-button danger-text" onClick={() => revokeKey(item.id)}>Revocar</button></div>)}</div> : <Empty title="Sin claves API" description="Crea una clave para habilitar conversiones desde esta interfaz."/>}<p className="small-note">Evita compartir claves. Esta app no las guarda en localStorage ni las envía a analítica.</p></section>
       </div><aside className="profile-side"><section className="panel usage-summary"><div className="panel-header"><div><h2>Uso reciente</h2><p>Registros de tu cuenta</p></div></div>{usageRows.length ? usageRows.slice(0, 5).map((row, i) => <div className="usage-row" key={String(row.id ?? i)}><span className="usage-icon"><Icon name="file" size={15}/></span><div><strong>{String(value(row, 'inputType', 'input_type', 'extension') ?? 'Conversión')}</strong><small>{dateLabel(String(value(row, 'timestamp', 'createdAt', 'created_at') ?? ''))}</small></div><StatusBadge status={String(value(row, 'status', 'outcome') ?? '—')}/></div>) : <Empty title="Sin actividad" description="No hay registros disponibles."/>}<Link to="/dashboard" className="inline-link">Ver resumen <Icon name="arrow" size={14}/></Link></section><section className="policy-card"><div className="policy-icon"><Icon name="shield" size={19}/></div><strong>Privacidad por diseño</strong><p>Los resultados Markdown se muestran desde memoria y no se almacenan en tu cuenta después de esta sesión.</p></section></aside></div>}</>;
 }
+
+export default App;

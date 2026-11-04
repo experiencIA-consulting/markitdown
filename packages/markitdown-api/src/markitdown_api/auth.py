@@ -4,6 +4,7 @@ from collections.abc import Generator
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request
+from fastapi.security import APIKeyHeader
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,8 @@ from .config import Settings, get_settings
 from .db import SessionLocal
 from .models import Account, ApiKey
 from .security import decode_access_token, hash_api_key
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 @dataclass(frozen=True)
@@ -75,7 +78,7 @@ def require_admin_account(
 
 
 def require_api_principal(
-    x_api_key: str | None = Header(default=None),
+    x_api_key: str | None = Depends(api_key_header),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Principal:

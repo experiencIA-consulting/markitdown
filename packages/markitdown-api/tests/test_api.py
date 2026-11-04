@@ -52,6 +52,52 @@ class FakeRedis:
         return 1
 
 
+def test_conversion_openapi_contract():
+    schema = main.app.openapi()
+    upload = schema["paths"]["/v1/conversions"]["post"]
+    components = schema["components"]["schemas"]
+
+    assert {"APIKeyHeader": []} in upload["security"]
+    assert schema["components"]["securitySchemes"]["APIKeyHeader"] == {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+    }
+
+    multipart = upload["requestBody"]["content"]["multipart/form-data"]["schema"]
+    assert multipart["required"] == ["file"]
+    assert multipart["properties"]["file"] == {"type": "string", "format": "binary"}
+    assert multipart["properties"]["ocr"]["type"] == "boolean"
+
+    accepted = upload["responses"]["202"]["content"]["application/json"]["schema"]
+    assert accepted["$ref"].endswith("/ConversionAcceptedResponse")
+    assert components["ConversionAcceptedResponse"]["examples"][0] == {
+        "id": "7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+        "status": "queued",
+        "status_url": "/v1/conversions/7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+    }
+
+    status = schema["paths"]["/v1/conversions/{conversion_id}"]["get"]
+    status_schema = status["responses"]["200"]["content"]["application/json"]["schema"]
+    assert status_schema["$ref"].endswith("/ConversionStatusResponse")
+    assert set(components["ConversionStatusResponse"]["properties"]) == {
+        "id",
+        "status",
+        "error_code",
+        "created_at",
+        "started_at",
+        "completed_at",
+        "result_expires_at",
+        "result_url",
+    }
+
+    result = schema["paths"]["/v1/conversions/{conversion_id}/result"]["get"]
+    markdown = result["responses"]["200"]["content"]["text/markdown"]["schema"]
+    assert markdown["type"] == "string"
+    assert markdown["example"].startswith("# Converted document")
+    assert "application/json" not in result["responses"]["200"]["content"]
+
+
 def test_account_key_conversion_ownership_and_usage(monkeypatch):
     fake_redis = FakeRedis()
     monkeypatch.setattr(
@@ -124,13 +170,26 @@ def test_account_key_conversion_ownership_and_usage(monkeypatch):
             json={"url": "https://example.com/report.pdf"},
         )
         assert queued.status_code == 202
-        conversion_id = queued.json()["id"]
-        assert (
-            client.get(
-                f"/v1/conversions/{conversion_id}", headers={"X-API-Key": api_key}
-            ).json()["status"]
-            == "queued"
+        queued_data = queued.json()
+        assert set(queued_data) == {"id", "status", "status_url"}
+        assert queued_data["status"] == "queued"
+        conversion_id = queued_data["id"]
+        queued_status = client.get(
+            f"/v1/conversions/{conversion_id}", headers={"X-API-Key": api_key}
         )
+        assert queued_status.status_code == 200
+        assert set(queued_status.json()) == {
+            "id",
+            "status",
+            "error_code",
+            "created_at",
+            "started_at",
+            "completed_at",
+            "result_expires_at",
+            "result_url",
+        }
+        assert queued_status.json()["status"] == "queued"
+        assert queued_status.json()["result_url"] is None
 
         with main.SessionLocal() as db:
             conversion = db.get(Conversion, conversion_id)
@@ -145,6 +204,7 @@ def test_account_key_conversion_ownership_and_usage(monkeypatch):
         )
         assert downloaded.status_code == 200
         assert downloaded.text == "# converted"
+        assert downloaded.headers["content-type"] == "text/markdown; charset=utf-8"
         assert not result_file.exists()
         assert (
             client.get(

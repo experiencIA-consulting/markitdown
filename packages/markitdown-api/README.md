@@ -69,7 +69,7 @@ If no plan is active, non-admin conversions fail with `plan_not_configured`. Thi
 
 ## Conversion API
 
-Upload a file:
+Conversion endpoints require an API key in the `X-API-Key` header. The upload endpoint accepts `multipart/form-data` with one required `file` part and an optional `ocr` boolean (defaults to `false`):
 
 ```bash
 curl -X POST https://api.example.com/v1/conversions \
@@ -77,7 +77,42 @@ curl -X POST https://api.example.com/v1/conversions \
   -F 'file=@report.pdf'
 ```
 
-Submit a public URL:
+An accepted upload responds with HTTP `202 Accepted` and JSON:
+
+```json
+{
+  "id": "7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+  "status": "queued",
+  "status_url": "/v1/conversions/7f3a2c9e54b14d5e8a2b1c0d9e6f1234"
+}
+```
+
+Poll the relative `status_url` using the same `X-API-Key`. The JSON response has these fields (timestamps are UTC ISO-8601 strings; fields may be `null`):
+
+```json
+{
+  "id": "7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+  "status": "succeeded",
+  "error_code": null,
+  "created_at": "2026-11-04T12:00:00Z",
+  "started_at": "2026-11-04T12:00:01Z",
+  "completed_at": "2026-11-04T12:00:03Z",
+  "result_expires_at": "2026-11-05T12:00:03Z",
+  "result_url": "/v1/conversions/7f3a2c9e54b14d5e8a2b1c0d9e6f1234/result"
+}
+```
+
+`status` is one of `queued`, `running`, `succeeded`, `failed`, `expired` or `cancelled`. `result_url` is `null` until the conversion succeeds (and after a result is claimed/downloaded). `error_code` is populated on failure. When ready, `GET result_url` returns the Markdown **as the raw response body**, with `Content-Type: text/markdown; charset=utf-8` and `Content-Disposition: attachment; filename="converted.md"`—it is not a JSON object or a JSON-encoded string. For example, the response body may be:
+
+```markdown
+# Quarterly report
+
+| Metric | Value |
+| --- | ---: |
+| Revenue | 1250 |
+```
+
+Submit a public URL (this endpoint returns the same `202` response shape):
 
 ```bash
 curl -X POST https://api.example.com/v1/conversions/from-url \
@@ -86,7 +121,7 @@ curl -X POST https://api.example.com/v1/conversions/from-url \
   -d '{"url":"https://example.com/report.pdf"}'
 ```
 
-Both return `202` and a conversion ID. Poll `GET /v1/conversions/{id}` and retrieve the Markdown from `GET /v1/conversions/{id}/result`. A completed result is one-time: after the server finishes sending it, it is deleted. If the transfer is interrupted, it remains available for retry until the 24-hour expiration; an abandoned download claim is released after one hour. A queued input is deleted after processing; failed and expired jobs retain only usage metadata.
+The interactive OpenAPI docs at `/docs` include the upload request shape, API-key security requirement, accepted/status JSON examples and the Markdown result media type. A completed result is one-time: after the server finishes sending it, it is deleted. If the transfer is interrupted, it remains available for retry until the 24-hour expiration; an abandoned download claim is released after one hour. A queued input is deleted after processing; failed and expired jobs retain only usage metadata.
 
 The URL fetcher only accepts public HTTP/HTTPS destinations on their standard ports, validates DNS results and redirects, blocks non-public IPs, rejects compressed HTTP transfer encodings, and limits response bytes and duration. This does not guarantee that arbitrary third-party content is safe to parse; workers run in a resource-limited container.
 

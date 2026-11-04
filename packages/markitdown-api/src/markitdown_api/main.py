@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -149,6 +150,54 @@ class ApiKeyCreate(BaseModel):
 class URLConversionRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
     ocr: bool = False
+
+
+class ConversionAcceptedResponse(BaseModel):
+    id: str = Field(description="Conversion identifier used by the status/result URLs.")
+    status: Literal["queued"] = "queued"
+    status_url: str = Field(description="Relative URL to poll for conversion status.")
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": "7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+                    "status": "queued",
+                    "status_url": "/v1/conversions/7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+                }
+            ]
+        }
+    }
+
+
+class ConversionStatusResponse(BaseModel):
+    id: str
+    status: Literal["queued", "running", "succeeded", "failed", "expired", "cancelled"]
+    error_code: str | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    result_expires_at: datetime | None
+    result_url: str | None = Field(
+        description="Relative result URL when status is succeeded and the result is available."
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "id": "7f3a2c9e54b14d5e8a2b1c0d9e6f1234",
+                    "status": "succeeded",
+                    "error_code": None,
+                    "created_at": "2026-11-04T12:00:00Z",
+                    "started_at": "2026-11-04T12:00:01Z",
+                    "completed_at": "2026-11-04T12:00:03Z",
+                    "result_expires_at": "2026-11-05T12:00:03Z",
+                    "result_url": "/v1/conversions/7f3a2c9e54b14d5e8a2b1c0d9e6f1234/result",
+                }
+            ]
+        }
+    }
 
 
 def _redis(request: Request) -> Redis:
@@ -666,6 +715,7 @@ async def _receive_upload(
 @app.post(
     "/v1/conversions",
     status_code=202,
+    response_model=ConversionAcceptedResponse,
     openapi_extra={
         "requestBody": {
             "required": True,
@@ -763,7 +813,11 @@ async def create_upload_conversion(
     }
 
 
-@app.post("/v1/conversions/from-url", status_code=202)
+@app.post(
+    "/v1/conversions/from-url",
+    status_code=202,
+    response_model=ConversionAcceptedResponse,
+)
 async def create_url_conversion(
     payload: URLConversionRequest,
     request: Request,
@@ -847,7 +901,7 @@ async def create_url_conversion(
     }
 
 
-@app.get("/v1/conversions/{conversion_id}")
+@app.get("/v1/conversions/{conversion_id}", response_model=ConversionStatusResponse)
 def conversion_status(
     conversion_id: str,
     principal: Principal = Depends(require_api_principal),
@@ -909,7 +963,23 @@ class OneTimeResultResponse(StreamingResponse):
             await asyncio.to_thread(self._callback, completed)
 
 
-@app.get("/v1/conversions/{conversion_id}/result")
+@app.get(
+    "/v1/conversions/{conversion_id}/result",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Raw UTF-8 Markdown body (not a JSON object). The result is one-time.",
+            "content": {
+                "text/markdown": {
+                    "schema": {
+                        "type": "string",
+                        "example": "# Converted document\n\nMarkdown content...",
+                    }
+                }
+            },
+        }
+    },
+)
 def download_result(
     conversion_id: str,
     principal: Principal = Depends(require_api_principal),

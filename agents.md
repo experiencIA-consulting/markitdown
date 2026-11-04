@@ -7,15 +7,20 @@ Este documento es el punto de partida para el siguiente agente. Describe la impl
 ## Estado de implementación
 
 - Implementación en `packages/markitdown-api/`: FastAPI, worker, cola Redis, PostgreSQL, almacenamiento temporal, Dockerfile, Compose, README y pruebas.
+- Implementación en `packages/markitdown-admin/`: SPA React + TypeScript + Vite, Nginx y build de producción.
 - **Estado remoto confirmado (2026-11-04):** Dokploy `xperiencIA` / `production`; Compose `markitdown`; ruta `packages/markitdown-api/compose.yaml`; dominio `mdservice.innersoft.com.mx` asignado al gateway `admin-web:80`.
-- El último despliegue consultado está en `done`; `api`, `worker`, `postgres` y `redis` están activos. `https://mdservice.innersoft.com.mx/health/live` y `/health/ready` respondieron `200`.
-- Se corrigió el `404 page not found`: Dokploy tenía el dominio configurado, pero los contenedores vivos no tenían labels Traefik ni estaban en `dokploy-network`. Se volvió a desplegar; el contenedor `api` ahora sí tiene las reglas y la red del proxy.
+- El último despliegue consultado está en `done`; `api`, `worker`, `postgres`, `redis` y `admin-web` están activos. `https://mdservice.innersoft.com.mx/health/live` y `/health/ready` respondieron `200`.
+- El administrador inicial ya fue invitado/creado. No volver a ejecutar `bootstrap-admin` sin comprobar antes si la cuenta ya existe; el comando la promovería y cambiaría su versión de sesión.
+- La página `/accept-invitation` fue corregida: el crash inicial `Cannot read properties of null (reading 'role')` ocurría al evaluar rutas admin sin sesión. El login web y la aceptación de invitación ya se validaron.
+- Hay un plan `pro_weekly` activo con cuotas provisionales configuradas por el administrador; `Free` no aparece activo en `/v1/plans` al momento de este documento. Los valores de ese plan no son un benchmark aprobado.
 - La rama desplegada es `HP240RG10-dev`. Confirmar la rama y el estado en Dokploy antes de cambios posteriores.
-- SMTP debe estar configurado si `EMAIL_VERIFICATION_REQUIRED=true` (valor predeterminado). Los pagos no están integrados.
+- SMTP está configurado en el puerto `465`, que requiere **SSL implícito**. `mail.py` usa `SMTP_SSL` automáticamente para 465 o cuando `SMTP_SSL=true`. `SMTP_STARTTLS` no aplica en ese puerto.
 - OCR está disponible explícitamente mediante el plugin MarkItDown + Azure OpenAI si se configuran sus secretos; por defecto no se invoca.
 - El despliegue inicial usa una instancia API, un worker y una conversión simultánea. No aumentar concurrencia sin medir la VPS de 2 GB.
-- El repositorio está indexado en Codebase Memory con el nombre `markitdown`.
-- La suite del paquete API registró `18 passed`; Black/Ruff pasaron. El build de Docker no se pudo probar en el entorno local porque no había daemon Docker; Dokploy sí completó el build remoto.
+- Los PDF sin OCR usan `pymupdf4llm==1.28.2` con `use_ocr=False`; MarkItDown queda como fallback. `PDF_ENGINE` permite cambiar el motor.
+- El error `resource_limit_exceeded` observado en un PDF se debió a que PyMuPDF4LLM activaba su OCR interno; se desactivó con `use_ocr=False`. El subproceso sigue limitado a 512 MiB y debe vigilarse.
+- El repositorio está indexado en Codebase Memory con el nombre `markitdown` (2.413 nodos y 11.891 relaciones). El artefacto `.codebase-memory/graph.db.zst` está generado pero no versionado.
+- La última suite del paquete API conocida antes del portal/PDF fue `27 passed`; Black/Ruff pasan. El build del frontend (TypeScript + Vite) pasa. No se ha ejecutado la suite completa después de los últimos cambios de portal y PDF.
 
 ## Requisitos acordados
 
@@ -38,39 +43,43 @@ Este documento es el punto de partida para el siguiente agente. Describe la impl
 Cliente
   |
   v
-Dominio y proxy gestionados por Dokploy
+Dokploy / Traefik
   |
   v
-API REST (solo servicio expuesto)
-  |                    \
-  v                     v
-PostgreSQL             Redis / cola
-                         |
-                         v
-                  Worker MarkItDown
-                         |
-                         v
-             Volumen temporal de archivos
+admin-web (Nginx: SPA + proxy /v1/*, /health/*, /docs)
+  |                         |
+  v                         v
+API REST                 PostgreSQL / Redis / Worker
+  |                         |
+  +-------- cola -----------+
+              |
+              v
+     Volumen temporal de archivos
 ```
 
+- **admin-web:** sirve la SPA y actúa como gateway same-origin. Es el único servicio publicado por Dokploy.
 - **API:** recibe solicitudes, autentica clientes, valida límites y crea trabajos.
 - **Redis:** cola de trabajos y coordinación; no expuesto públicamente.
-- **PostgreSQL:** cuentas, claves API protegidas, estados de trabajos y registros de consumo.
+- **PostgreSQL:** cuentas, claves API protegidas, planes, estados de trabajos y registros de consumo.
 - **Worker:** ejecuta la conversión con la API Python de MarkItDown, separado del proceso HTTP.
 - **Volumen temporal:** mantiene las entradas mientras están pendientes/en proceso y los resultados hasta su entrega o expiración. Debe tener límites y limpieza automática.
-- **Dokploy:** publica el servicio API en el dominio configurado. Redis, PostgreSQL y workers permanecen en la red interna de Docker.
+- **Dokploy:** publica `admin-web` en el dominio configurado. API, Redis, PostgreSQL y worker permanecen en la red interna de Docker.
 
 Con 2 GB de RAM, mantener un worker con concurrencia 1. Redis y PostgreSQL se ejecutan en la misma VPS que Dokploy; conversiones complejas pueden agotar memoria. No anunciar capacidad de alta carga hasta medirla. El Compose limita recursos y resultados temporales, pero no elimina esta limitación física.
 
-## Contrato inicial de API
+## Contrato de API actual
 
 - `POST /v1/conversions`: recibe un archivo multipart y responde `202 Accepted` con el ID del trabajo.
 - `POST /v1/conversions/from-url`: recibe una URL pública y responde `202 Accepted` con el ID del trabajo.
 - `GET /v1/conversions/{id}`: devuelve el estado y errores públicos del trabajo.
 - `GET /v1/conversions/{id}/result`: entrega el Markdown solo al propietario del trabajo.
-- Endpoints de cuenta y claves API para registro/autenticación, rotación y revocación.
-- Endpoint de consumo para consultar las métricas disponibles.
+- `GET/PATCH /v1/account/me` y `POST /v1/account/password`: perfil y contraseña del usuario autenticado.
+- `POST /v1/web-auth/login`, `/me`, `/csrf`, `/logout`, `/accept-invitation`: sesión web con cookies y CSRF.
+- `GET /v1/plans`: catálogo público de planes activos.
+- Administración, solo `role=admin`: `/v1/admin/overview`, `/v1/admin/users`, `/v1/admin/users/{id}`, `/v1/admin/plans`, `/v1/admin/plans/{id}`, `/v1/admin/reports/consumption` y `.csv`.
 - Endpoints de salud (`live` y `ready`) para operación y despliegue.
+
+`POST /v1/accounts` sigue existiendo, pero el registro público está desactivado por defecto (`PUBLIC_SIGNUP_ENABLED=false`). El flujo normal es invitación desde administración. Las claves API se usan en `X-API-Key`; las sesiones web usan cookies same-origin más `X-CSRF-Token` en mutaciones.
 
 Estados sugeridos: `queued`, `running`, `succeeded`, `failed`, `expired` y `cancelled`.
 
@@ -85,6 +94,8 @@ La descarga se considerará completa cuando el servidor finalice el envío de la
 5. Timeout de conversión: 900 segundos. La cola llena devuelve un error controlado (`429`/`503`).
 6. Los límites están configurados mediante variables de entorno en `packages/markitdown-api/compose.yaml`.
 7. Carga por encima de 100 MiB no está soportada; aceptación de un tamaño no garantiza que cualquier formato complejo quepa en la memoria disponible.
+8. PDF sin OCR: PyMuPDF4LLM 1.28.2 con `use_ocr=False`; fallback a MarkItDown si devuelve vacío o falla. El OCR real solo se invoca con el plugin MarkItDown + Azure.
+9. El subproceso de conversión se limita a `MAX_CONVERSION_MEMORY_BYTES` (512 MiB) y el contenedor worker a 768 MiB. PyMuPDF4LLM aún puede acercarse al límite en documentos complejos; un `resource_limit_exceeded` debe diagnosticarse antes de elevar el límite.
 
 La categoría “todos los formatos” debe validarse contra las capacidades y dependencias reales de MarkItDown. Los extras `[all]`, herramientas del sistema, OCR y ciertas integraciones pueden aumentar el tamaño de la imagen o requerir servicios externos. No asumir que todos los formatos tienen conversión local equivalente.
 
@@ -116,50 +127,62 @@ Campos propuestos por conversión:
 
 Vigilar el crecimiento de registros indefinidos, índices, copias de seguridad y capacidad de PostgreSQL. Evitar guardar datos identificables no necesarios. Definir posteriormente cómo se anonimizan o eliminan los vínculos a una cuenta cuando se solicite su cierre.
 
-## Cuentas, claves y facturación
+## Cuentas, claves, planes y facturación
 
-- Implementado: cuenta individual, verificación de correo, login con token de sesión, recuperación de contraseña y gestión de claves API.
-- Las claves API se entregan una sola vez, se almacenan como HMAC y se envían en `X-API-Key`; las sesiones usan `Authorization: Bearer`.
-- Hay un máximo de 20 claves activas por cuenta. Restablecer una contraseña revoca las claves y cambia la versión de sesión.
-- `GET /v1/usage` devuelve registros paginados; no procesa pagos ni almacena tarjetas.
-- El proveedor de pagos, países, moneda y unidad facturable siguen pendientes.
+- Implementado: cuenta individual, verificación de correo, login web, recuperación y cambio de contraseña, y gestión de claves API.
+- Roles `user`/`admin`, estado activo/suspendido, invitaciones con caducidad, planes asignables y overrides de cuotas por cuenta.
+- Las claves API se entregan una sola vez, se almacenan como HMAC y se envían en `X-API-Key`; las sesiones web usan cookies `HttpOnly` y CSRF. Las sesiones Bearer siguen disponibles para clientes API.
+- Hay un máximo de 20 claves activas por cuenta. Restablecer o cambiar una contraseña revoca las claves y cambia la versión de sesión.
+- `GET /v1/usage` devuelve registros paginados. La administración tiene informes agregados y CSV.
+- El plan `pro_weekly` está activo con cuotas provisionales; Free no está activo en `/v1/plans` al escribir esto. No tratar esos valores como benchmark aprobado.
+- El proveedor de pagos, países, moneda y unidad facturable siguen pendientes. No hay checkout; la asignación de plan es manual.
 
 ## OCR y servicios externos
 
 - Implementado mediante el plugin OCR de MarkItDown con Azure OpenAI/OpenAI-compatible.
 - Se habilita por conversión (`ocr=true`) y falla con `ocr_provider_not_configured` si faltan secretos; por defecto está apagado.
 - Secretos en Dokploy: `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_MODEL`.
+- PyMuPDF4LLM se ejecuta con `use_ocr=False`; el OCR de pago solo se usa por la ruta MarkItDown/Azure cuando se solicita explícitamente.
 - Habilitar OCR envía imágenes de documentos al endpoint configurado; confirmar consentimiento, coste y privacidad antes de hacerlo por cliente.
 
 ## Estado de fases y siguiente trabajo
 
 1. **Implementado:** API versionada, auth, conversión por archivo y URL, cola, worker, límites y retención.
-2. **Implementado:** Compose para Dokploy, servicio público `api:8000`, Redis/PostgreSQL/worker internos y healthchecks.
-3. **Implementado:** tests funcionales y de conversión; el CI tiene un job `api-tests`.
-4. **Pendiente antes de escala:** realizar benchmark con formatos y tamaños representativos en la VPS; no hacerlo desde un entorno local si la instrucción activa del usuario lo prohíbe.
-5. **Pendiente de producción:** establecer backups/restauración de PostgreSQL, migraciones versionadas (hoy el arranque usa `metadata.create_all`), políticas de anonimización/cierre de cuenta y abuso de alta frecuencia en registro/reset.
-6. **Pendiente posterior:** seleccionar proveedor de pagos y unidad de cobro, sin almacenar datos de tarjeta.
+2. **Implementado:** Compose para Dokploy, gateway `admin-web`, Redis/PostgreSQL/worker internos y healthchecks.
+3. **Implementado:** portal web, RBAC admin, invitaciones, planes, overrides de cuotas, informes y cambio de contraseña.
+4. **Implementado:** Alembic y migraciones `0001_base`/`0002_admin_portal`; el arranque aplica `upgrade head`.
+5. **Pendiente antes de escala:** benchmark de formatos/tamaños en la VPS, especialmente PDF con PyMuPDF4LLM; medir RSS, CPU y latencia antes de aumentar concurrencia.
+6. **Pendiente de producción:** backups/restauración de PostgreSQL, política de anonimización/cierre de cuenta, abuso de registro/reset, y verificar licencia AGPL/comercial de PyMuPDF/PyMuPDF4LLM.
+7. **Pendiente de producto:** definir cuotas definitivas de Free/Pro/Lifetime/Business y activar Free si se usará como plan por defecto.
+8. **Pendiente de validación:** probar una conversión real con un usuario no admin, descarga única, expiración a 24 h, OCR y exportación CSV.
 
 ## Procedimiento operativo Dokploy
 
 - El Compose debe apuntar a `packages/markitdown-api/compose.yaml` en la raíz del checkout del repositorio `experiencIA-consulting/markitdown`.
-- El dominio debe seleccionar `serviceName=api`, puerto interno `8000`, path `/`; nunca seleccionar `worker`.
-- Para 404, comparar `compose.getConvertedCompose` con `docker.getConfig` del contenedor vivo: la conversión debe tener labels Traefik y `dokploy-network`.
-- Después de cambiar dominios/rutas, redeploy Compose para recrear contenedores con los labels. Healthchecks confirmados: `/health/live` y `/health/ready`.
-- El flujo API usa `POST /v1/accounts` → verificar correo → `POST /v1/auth/token` → `POST /v1/api-keys`; ver ejemplos en `packages/markitdown-api/README.md`.
-- Errores observados históricamente: Nixpacks no correspondía a este monorepo; `composePath` incorrecto causaba “Compose file not found”; volumen PostgreSQL persistente puede conservar una contraseña anterior aunque `POSTGRES_PASSWORD` cambie en Dokploy. No borrar volúmenes para resolver auth DB sin confirmar pérdida de datos; sincronizar el rol en PostgreSQL de forma segura.
+- El dominio debe seleccionar `serviceName=admin-web`, puerto interno `80`, path `/`; nunca seleccionar `worker` ni `api`. El gateway sirve la SPA y proxya `/v1/*`, `/health/*`, `/docs` y páginas de correo a `api:8000`.
+- Para 404, comparar `compose.getConvertedCompose` con `docker.getConfig` del contenedor vivo: debe tener labels Traefik y `dokploy-network`.
+- Después de cambiar dominios/rutas o variables, redeploy Compose. Healthchecks confirmados: `/health/live` y `/health/ready`.
+- El flujo normal de alta es invitación desde `/users`, no registro público. El primer admin se crea dentro del contenedor `api` con `python -m markitdown_api.admin_cli bootstrap-admin <email>`. Si SMTP falla, el comando imprime el enlace de invitación.
+- SMTP en puerto 465 usa SSL implícito; no activar STARTTLS para ese puerto. El cliente detecta 465 automáticamente y también admite `SMTP_SSL=true`.
+- Alembic aplica migraciones al arrancar. No volver a `metadata.create_all` para evolución de esquema.
+- El gateway envía `Cache-Control: no-store` para el index y cachea assets con hash de forma inmutable; tras un despliegue, un `Ctrl+F5` debe ser suficiente.
+- Errores observados históricamente: Nixpacks no correspondía a este monorepo; `composePath` incorrecto causaba “Compose file not found”; un contenedor vivo sin labels Traefik producía 404; un volumen PostgreSQL persistente puede conservar una contraseña anterior aunque `POSTGRES_PASSWORD` cambie. No borrar volúmenes para resolver auth DB sin confirmar pérdida de datos.
 
 ## Criterios de aceptación
 
-- Una cuenta no puede consultar conversiones ni resultados de otra.
+- Una cuenta no puede consultar conversiones, resultados, claves ni consumo de otra.
+- Un usuario normal recibe `403` en endpoints de administración; las rutas de la SPA no son el control de acceso.
 - Claves API se pueden revocar y no aparecen en logs ni respuestas posteriores a su creación.
+- Las invitaciones caducan, no se pueden reutilizar y permiten establecer contraseña.
 - Archivos y descargas de hasta 100 MB se procesan sin cargarse enteros en memoria.
 - URLs a destinos internos/privados, redirecciones peligrosas y descargas excesivas se bloquean.
 - La cola y la concurrencia respetan los límites y rechazan carga excesiva de forma controlada.
 - El archivo fuente se elimina al terminar; el resultado se elimina tras transferencia completa o al vencer 24 horas; una transferencia interrumpida no consume el resultado.
 - Las métricas acordadas se guardan indefinidamente sin almacenar documentos ni Markdown.
+- Las cuotas se calculan en `America/Mazatlan`; una conversión fallida no consume conversiones/páginas, pero sí bytes y requests/minuto.
 - OCR/Azure no se invocan sin habilitación explícita y credenciales configuradas.
-- Dokploy expone únicamente la API; dependencias internas no tienen puertos públicos.
+- Dokploy expone únicamente el gateway `admin-web`; API, Redis, PostgreSQL y worker no tienen puertos públicos.
+- Los PDF se convierten con PyMuPDF4LLM y todas las páginas/filas del documento están presentes; si se requiere fidelidad literal, se usa el modo que se defina.
 - Las pruebas de carga documentan memoria, CPU, disco, tiempos y fallos para decidir si se amplía la VPS o se separan workers.
 
 ## Pendientes para una fase posterior
@@ -171,7 +194,7 @@ Vigilar el crecimiento de registros indefinidos, índices, copias de seguridad y
 
 ## Mejoras implementadas: validación de formatos y límites de memoria
 
-Implementación local en `packages/markitdown-api/`; **todavía no desplegada ni medida en la VPS**. Mantener un worker y una conversión simultánea.
+Implementación en `packages/markitdown-api/`; las validaciones de entrada, límites de memoria y limpieza están desplegadas junto con el portal. Mantener un worker y una conversión simultánea.
 
 ### Validación de entradas
 
@@ -188,8 +211,9 @@ Implementación local en `packages/markitdown-api/`; **todavía no desplegada ni
 
 ### Verificación y pendientes
 
-- Pruebas locales del paquete API: `27 passed`. Ruff y Black pasan; el YAML de Compose parsea. No se probó el build Docker (sin daemon en este entorno), ni se desplegó o ejecutó benchmark en Dokploy/VPS.
+- Pruebas locales del paquete API: `27 passed` antes del portal/PDF. Ruff y Black pasan; el YAML de Compose parsea. El build Docker se completó en Dokploy. No se ha ejecutado la suite completa después de los últimos cambios de portal y PDF.
 - Antes de escalar: probar formatos/tamaños representativos en la VPS, observar memoria/CPU y confirmar que el OOM mata el subprocess sin reiniciar o reencolar indefinidamente el worker. No aumentar concurrencia hasta medir.
+- `resource_limit_exceeded` apareció con PyMuPDF4LLM porque su OCR interno estaba activo; se corrigió con `use_ocr=False`. Si reaparece, revisar RSS antes de subir límites o usar `PDF_ENGINE=markitdown` como mitigación temporal.
 - Aceptar hasta 100 MiB de entrada no garantiza conversión para todo documento. La validación de formato tampoco es análisis de malware ni garantía de seguridad del parser.
 
 ## Plan de referencia: interfaz de administración y portal de usuario
@@ -286,7 +310,7 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 
 ## Implementación del portal y cuotas (estado)
 
-**Estado:** backend y portal desplegados en la VPS el 2026-11-04. El gateway responde `/login`, `/health/live`, `/health/ready` y `/v1/plans`. Falta provisionar el primer administrador, configurar el plan Free y validar el flujo completo con una cuenta real.
+**Estado:** backend y portal desplegados en la VPS el 2026-11-04. El gateway responde `/login`, `/health/live`, `/health/ready` y `/v1/plans`. El administrador inicial ya fue creado y se validó el acceso web/la aceptación de invitación. Hay un plan `pro_weekly` activo con cuotas provisionales; Free no está activo. Falta validar el flujo completo con un usuario no administrador.
 
 ### Backend
 
@@ -315,7 +339,7 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 - Compose añade `admin-web` (Nginx) que sirve la SPA y proxya `/v1/*`, `/health/*`, `/docs` y páginas de correo a `api:8000`.
 - El dominio de Dokploy apunta a `admin-web:80`; API, worker, PostgreSQL, Redis y `admin-web` están activos y saludables.
 - Verificados remotamente `/health/live`, `/health/ready`, `/login`, `/docs` y `/v1/plans`. El build del frontend (TypeScript + Vite) pasa.
-- Pendiente operativo: provisionar el primer administrador, configurar SMTP si no está listo, completar y activar el plan Free, y probar invitación y conversión con una cuenta real.
+- Pendiente operativo: validar el flujo completo con un usuario no administrador, definir si Free será el plan por defecto y probar la descarga única/expiración a 24 h.
 
 ### Extracción de PDF
 
@@ -323,3 +347,23 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 - OCR sigue usando el plugin MarkItDown + Azure; PyMuPDF 1.28.2 cumple el rango `<2` del plugin OCR.
 - `PDF_ENGINE` permite elegir `pymupdf4llm` (predeterminado) o `markitdown` sin cambiar código.
 - Revisar la licencia AGPL/comercial de PyMuPDF/PyMuPDF4LLM antes de una explotación comercial pública.
+
+## Estado actual para el siguiente agente
+
+### Lo que ya está funcionando
+
+- Dominio y gateway: `https://mdservice.innersoft.com.mx` sirve la SPA y proxya la API.
+- Administrador inicial creado; login web e invitación validados.
+- `pro_weekly` activo con cuotas provisionales: 1.000 conversiones/mes, 1 GiB de entrada/mes, 10.000 páginas/mes, 5 req/min, 100 MiB por archivo, lote 1, OCR deshabilitado. Free está inactivo.
+- PDF de prueba `LISTA_PRECIOS_MX_AGO26.pdf`: PyMuPDF4LLM devuelve las 3 páginas y todas las filas (33 precios, 33 bonos, 4 paquetes), pero con formato más compacto y sin encabezados decorativos duplicados. Si el usuario exige fidelidad literal 1:1, hace falta un modo `verbatim`; no confundir formato con pérdida de datos.
+- El error `resource_limit_exceeded` de ese PDF se corrigió desactivando el OCR interno de PyMuPDF4LLM. Si vuelve a aparecer, medir RSS antes de subir `MAX_CONVERSION_MEMORY_BYTES`.
+
+### Próximos pasos recomendados
+
+1. Probar una conversión con un usuario no admin asignado a `pro_weekly` y verificar cuotas, descarga única, expiración y consumo.
+2. Definir la matriz definitiva de Free y activarlo si será el plan por defecto; hoy los usuarios sin plan reciben `plan_not_configured`.
+3. Ejecutar benchmark en la VPS con PDFs/Office de distintos tamaños; documentar RSS, CPU y duración antes de aumentar workers o límites.
+4. Configurar backups y probar restauración de PostgreSQL.
+5. Decidir si se implementa un modo de salida PDF literal/verbatim y si se acepta la licencia AGPL/comercial de PyMuPDF4LLM.
+6. Revisar `.codebase-memory/graph.db.zst`: está generado y sin versionar; decidir si se ignora o se comparte.
+7. No volver a ejecutar `bootstrap-admin` para el mismo correo sin comprobar antes la cuenta; el comando promueve y cambia la sesión.

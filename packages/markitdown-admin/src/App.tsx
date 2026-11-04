@@ -136,7 +136,7 @@ function App() {
   useEffect(() => {
     let active = true;
     api.me().then((data) => { if (active) setUser(('user' in (data as object) ? (data as { user?: User }).user : data as User) ?? null); })
-      .catch((error) => { if (active) setAuthError(errText(error)); })
+      .catch((error) => { if (active && !String(error instanceof Error ? error.message : error).includes('invalid_or_expired_session')) setAuthError(errText(error)); })
       .finally(() => { if (active) setAuthLoading(false); });
     return () => { active = false; };
   }, []);

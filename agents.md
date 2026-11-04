@@ -20,7 +20,7 @@ Este documento es el punto de partida para el siguiente agente. Describe la impl
 - Los PDF sin OCR usan `pymupdf4llm==1.28.2` con `use_ocr=False`; MarkItDown queda como fallback. `PDF_ENGINE` permite cambiar el motor.
 - El error `resource_limit_exceeded` observado en un PDF se debió a que PyMuPDF4LLM activaba su OCR interno; se desactivó con `use_ocr=False`. El subproceso sigue limitado a 512 MiB y debe vigilarse.
 - El repositorio está indexado en Codebase Memory con el nombre `markitdown`. El artefacto `.codebase-memory/graph.db.zst` está versionado para que otros agentes puedan reutilizar el índice sin reindexar; `artifact.json` indica el commit y los conteos.
-- La última suite del paquete API conocida antes del portal/PDF fue `27 passed`; Black/Ruff pasan. El build del frontend (TypeScript + Vite) pasa. No se ha ejecutado la suite completa después de los últimos cambios de portal y PDF.
+- Suite del paquete API al 2026-11-04 tras el commit `a026ffa`: **28 passed**; Ruff y Black pasan. El build del frontend (TypeScript + Vite) pasa.
 
 ## Requisitos acordados
 
@@ -72,7 +72,7 @@ Con 2 GB de RAM, mantener un worker con concurrencia 1. Redis y PostgreSQL se ej
 - `POST /v1/conversions`: recibe un archivo multipart y responde `202 Accepted` con el ID del trabajo.
 - `POST /v1/conversions/from-url`: recibe una URL pública y responde `202 Accepted` con el ID del trabajo.
 - `GET /v1/conversions/{id}`: devuelve el estado y errores públicos del trabajo.
-- `GET /v1/conversions/{id}/result`: entrega el Markdown solo al propietario del trabajo.
+- `GET /v1/conversions/{id}/result`: entrega el Markdown solo al propietario del trabajo, como cuerpo crudo UTF-8 (`Content-Type: text/markdown; charset=utf-8`, `Content-Disposition: attachment; filename="converted.md"`), nunca como JSON. La descarga es de un solo uso: al completarse se borra el resultado y `result_url` pasa a `null`.
 - `GET/PATCH /v1/account/me` y `POST /v1/account/password`: perfil y contraseña del usuario autenticado.
 - `POST /v1/web-auth/login`, `/me`, `/csrf`, `/logout`, `/accept-invitation`: sesión web con cookies y CSRF.
 - `GET /v1/plans`: catálogo público de planes activos.
@@ -81,7 +81,7 @@ Con 2 GB de RAM, mantener un worker con concurrencia 1. Redis y PostgreSQL se ej
 
 `POST /v1/accounts` sigue existiendo, pero el registro público está desactivado por defecto (`PUBLIC_SIGNUP_ENABLED=false`). El flujo normal es invitación desde administración. Las claves API se usan en `X-API-Key`; las sesiones web usan cookies same-origin más `X-CSRF-Token` en mutaciones.
 
-Estados sugeridos: `queued`, `running`, `succeeded`, `failed`, `expired` y `cancelled`.
+Estados: `queued`, `running`, `succeeded`, `failed` y `expired`. `cancelled` existe en el enum pero **ningún código lo emite** y no hay endpoint de cancelación; no documentarlo como disponible.
 
 La descarga se considerará completa cuando el servidor finalice el envío de la respuesta sin desconexión del cliente. Si el cliente se desconecta antes de completar la transferencia, conservar el resultado para un nuevo intento hasta la caducidad. El servidor no puede confirmar que el cliente haya guardado el archivo; si se requiere confirmación de aplicación, diseñar un endpoint de acuse de recibo.
 
@@ -367,3 +367,70 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 5. Decidir si se implementa un modo de salida PDF literal/verbatim y si se acepta la licencia AGPL/comercial de PyMuPDF4LLM.
 6. El artefacto `.codebase-memory/graph.db.zst` está versionado; si se reindexa, actualizar y commitear también `graph.db.zst` y `artifact.json` para que otros agentes bootstrapeen desde el índice compartido.
 7. No volver a ejecutar `bootstrap-admin` para el mismo correo sin comprobar antes la cuenta; el comando promueve y cambia la sesión.
+8. Publicar `docs/api/` y redesplegar el contrato de conversiones de `a026ffa`; el Swagger público aún muestra `schema: {}`. Ver “Plan registrado: contrato de integración para consumidores”.
+
+## Plan registrado: contrato de integración para consumidores
+
+**Origen (2026-11-04):** un agente integrador externo pidió cuenta de pruebas, ejemplos sanitizados de respuesta y contrato adicional, porque el Swagger enumeraba los endpoints pero no aclaraba la forma del Markdown devuelto.
+
+### Decisiones tomadas
+
+- **No se entrega cuenta demo ni API key de prueba compartida.** Se publican contrato y ejemplos sanitizados; el acceso real se solicita por el flujo de invitación existente desde `/users`.
+- **Alcance:** F0 (desplegar el contrato ya codificado) + F1 (paquete `docs/api/`). Sin cambios de código, sin migraciones, sin variables nuevas.
+- **Ubicación:** `docs/api/` en la raíz del repo, enlazado desde `packages/markitdown-api/README.md`.
+- **Descartado conscientemente:** sandbox/`/v1/sandbox`, respuestas pregrabadas, `?format=json`, `ErrorResponse` en OpenAPI, `Cache-Control: no-store`, webhooks, idempotencia, CORS y snapshot verificado en CI.
+
+### Diagnóstico confirmado
+
+- El commit `a026ffa` (“Documenta y tipa la API de conversiones”) ya está en `HP240RG10-dev` e igual a `origin`; añade `ConversionAcceptedResponse`, `ConversionStatusResponse`, `response_model`, el ejemplo `text/markdown`, `APIKeyHeader` y tests de contrato.
+- **El Swagger público sigue obsoleto:** `https://mdservice.innersoft.com.mx/openapi.json` devuelve `schema: {}` en `202` y estado, no declara `securitySchemes` y marca `GET /v1/conversions/{id}/result` como `application/json`. La causa raíz es la falta de redeploy, no la falta de código. Mientras no se despliegue, los ejemplos publicados no coincidirán con `/docs`.
+
+### F0 — Desplegar el contrato (solo operación)
+
+1. Confirmar en Dokploy que el Compose `markitdown` construye la rama `HP240RG10-dev` en `a026ffa`; ruta `packages/markitdown-api/compose.yaml`, dominio a `admin-web:80`.
+2. Redeploy del Compose. Sin cambios de secretos, variables, volúmenes ni rutas.
+3. Verificar en `/openapi.json`: `components.securitySchemes.APIKeyHeader`; `202` → `ConversionAcceptedResponse`; estado → `ConversionStatusResponse`; `/result` solo con `text/markdown` y ejemplo; sin `application/json` en ese `200`.
+4. Smoke test con una cuenta real: `202` → polling hasta `succeeded` → descarga `200 text/markdown` → segunda descarga `410`.
+5. Comprobar `/health/live` y `/health/ready` = `200`.
+
+**Criterio de bloqueo:** si el OpenAPI desplegado sigue mostrando `schema: {}`, F0 no está terminada aunque el redeploy figure en `done`.
+
+### F1 — Paquete `docs/api/` (solo documentación)
+
+| Archivo | Contenido |
+|---|---|
+| `docs/api/README.md` | Índice, base URL, auth `X-API-Key`, versión/commit, superficie de integración vs portal/admin |
+| `docs/api/markdown-result.md` | Markdown crudo UTF-8 con `text/markdown; charset=utf-8` y `Content-Disposition: attachment; filename="converted.md"`; sin envoltura JSON ni esquema fijo; sin `Content-Length`/`Range`; cuerpo posiblemente vacío; PDF solo-imagen; prohibido `HEAD`/prefetch/preview porque el `GET` consume |
+| `docs/api/conversion-lifecycle.md` | `202` → polling de `status_url` relativo → descarga; tabla estado/`result_url`/resultado; `409` no listo, `410` consumido/expirado/reclamado, `404` inexistente o de otra cuenta; `result_url` desaparece tras descarga completa; reintento válido solo tras desconexión; sin webhooks ni SSE |
+| `docs/api/errors.md` | Dos sobres reales (`{"detail":"code"}` y el array de validación de Pydantic) más el catálogo de códigos síncronos y de job, con columna “¿reintentar?” |
+| `docs/api/limits-and-formats.md` | 100 MiB/archivo, 50 MiB de salida, TTL 24 h, 1 worker/1 conversión/5 pendientes/1 upload, timeout 900 s, RPM, mes natural en `America/Mazatlan`, allowlist real de `input_validation.py` y límites ZIP/Office (5.000 entradas, 128 MiB) |
+| `docs/api/sandbox.md` | “Acceso bajo solicitud”: no hay cuenta demo ni key compartida; qué se necesita para pedir acceso |
+| `docs/api/examples/*` | `accepted-202.json`, `status-succeeded.json`, `status-failed.json`, `status-expired.json`, `errors/*.json` y `result.md` con tabla GFM |
+| `docs/api/openapi.consumer.json` | Snapshot filtrado a `/v1/conversions*`, `/v1/plans` y `/health/*`, generado una vez con comando documentado; sin rutas de admin |
+| `packages/markitdown-api/README.md` | Enlace a `docs/api/` |
+
+**Criterios de aceptación de F1**
+
+- Un integrador responde sin ambigüedad si el resultado es JSON o Markdown, y sabe que la descarga es de un solo uso.
+- Ejemplos válidos y sanitizados: sin `mk_live_`, correos reales, URLs internas, nombres de clientes ni documentos de clientes. No usar `LISTA_PRECIOS_MX_AGO26.pdf`.
+- Cero claves en el repo, en Swagger, en Postman o en el historial de git.
+- El catálogo de errores y los límites coinciden con el código de `main.py`, `worker.py`, `input_validation.py` y `compose.yaml`; no documentar `cancelled`, webhooks, idempotencia, CORS ni scopes de key.
+- `openapi.consumer.json` se genera desde `a026ffa` y se etiqueta con ese commit.
+
+### Riesgos y mitigaciones
+
+- **Swagger obsoleto hasta F0:** el integrador sigue viendo el contrato viejo. Mitigación: ejecutar F0 y validar `/openapi.json`, no solo el estado del redeploy.
+- **Deriva entre documentación y código:** el snapshot y los ejemplos se generan desde el commit publicado; al cambiar el contrato hay que regenerarlos.
+- **Confusión `409` vs `410`:** `409` = aún no listo; `410` = consumido, expirado o reclamado. Documentarlo explícitamente.
+- **`status=succeeded` con `result_url=null`:** significa que el resultado ya se descargó; no reintentar.
+- **Dos sobres de error:** no normalizar el `422` en esta fase; el cliente debe tolerar ambos.
+- **Errores del gateway:** Nginx puede devolver HTML en `413/502/504` antes de llegar a FastAPI; el cliente no debe asumir JSON siempre.
+- **PDF solo imagen sin OCR:** puede devolver cuerpo vacío o casi vacío; no prometer extracción de texto en ese caso.
+
+### Respuesta acordada para el integrador
+
+> No manejamos cuenta demo ni publicamos API keys de prueba. El resultado no es JSON: `GET /v1/conversions/{id}/result` devuelve el cuerpo HTTP completo como Markdown UTF-8 (`Content-Type: text/markdown; charset=utf-8`, `Content-Disposition: attachment; filename="converted.md"`), sin envoltura ni esquema fijo. `409` = aún no listo; `410` = ya descargado o expirado; `404` = no existe o no es de tu cuenta. La descarga es de un solo uso. Estamos publicando el contrato con ejemplos sanitizados, catálogo de errores, límites y un `openapi.consumer.json` sin rutas de administración; el Swagger público se actualizará en el próximo despliegue.
+
+### Siguiente paso
+
+Ejecutar F1 y después F0. No crear endpoints nuevos ni tocar el contrato de ejecución para satisfacer esta solicitud.

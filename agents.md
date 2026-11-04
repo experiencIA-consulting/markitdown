@@ -191,3 +191,95 @@ Implementación local en `packages/markitdown-api/`; **todavía no desplegada ni
 - Pruebas locales del paquete API: `27 passed`. Ruff y Black pasan; el YAML de Compose parsea. No se probó el build Docker (sin daemon en este entorno), ni se desplegó o ejecutó benchmark en Dokploy/VPS.
 - Antes de escalar: probar formatos/tamaños representativos en la VPS, observar memoria/CPU y confirmar que el OOM mata el subprocess sin reiniciar o reencolar indefinidamente el worker. No aumentar concurrencia hasta medir.
 - Aceptar hasta 100 MiB de entrada no garantiza conversión para todo documento. La validación de formato tampoco es análisis de malware ni garantía de seguridad del parser.
+
+## Plan pendiente: interfaz de administración y portal de usuario
+
+**Estado:** plan acordado; la interfaz, roles administrativos, planes/cuotas y API administrativa todavía no están implementados. No asumir que ya existen endpoints admin.
+
+### Decisiones confirmadas
+
+- La interfaz y la API deben compartir `mdservice.innersoft.com.mx`, con rutas como `/login`, `/dashboard`, `/convert`, `/users`, `/reports/consumption` y `/profile`.
+- Backend FastAPI existente; se propone una SPA React + TypeScript + Vite y un gateway Nginx en Dokploy. El gateway sirve la SPA y reenvía `/v1/*` a FastAPI por la red interna; conservar las rutas actuales de API.
+- El dominio público se debe dirigir al gateway/web, no al worker. Redis, PostgreSQL y worker siguen privados.
+- La zona de reinicio de cuotas mensuales es `America/Mazatlan`. Los informes se presentan agrupados en la zona horaria IANA del navegador.
+- Free: máximo 300 conversiones por mes natural y 10 MiB por archivo. Mantener el hard cap global actual de 100 MiB.
+- Lotes: máximo inicial de 1 archivo por solicitud; dejar el valor como capacidad editable por plan para una posible ampliación.
+- Cuotas requeridas por plan: conversiones, bytes de entrada (MB), páginas y solicitudes por minuto. Los valores de MB/páginas/RPM y los límites de otros planes se decidirán después de benchmark; no inventarlos ni habilitar un plan con una matriz incompleta.
+- Conversión fallida: no consume cuota de conversiones ni páginas; sí se contabilizan los bytes realmente procesados y las solicitudes autenticadas por minuto.
+- Páginas: mantener `page_count` como nullable cuando el conversor no pueda determinarlo. Para enforcement de cuotas usar una unidad derivada: páginas reales cuando existan; en imagen o formato sin paginación, 1 unidad por archivo convertido.
+- OCR se habilita por plan y explícitamente por conversión. Medir cuota OCR por el número real de páginas/imágenes enviadas al proveedor, separado del número de páginas fuente.
+- Usar los niveles y prestaciones de FileToMD.ai como referencia para Free, Pro semanal/mensual/anual, Lifetime y Business. Mostrar precios solo como catálogo informativo; no hay checkout ni pagos integrados. Asignación manual de plan por administrador.
+- Business será una cuenta individual en v1; no implementar organizaciones ni membresías todavía.
+
+### Arquitectura e identidad
+
+- Añadir `packages/markitdown-admin/` como aplicación SPA. Publicar mediante un servicio web estático/Nginx en Compose/Dokploy. Nginx sirve la SPA y hace proxy de `/v1/*` a `api:8000`; revisar también `/health/*` y `/docs` según la política de exposición.
+- Reemplazar el destino público del dominio en Dokploy de `api:8000` por el gateway web. Mantener el API accesible al gateway en la red interna y, si se requiere conservar clientes externos, mantener `/v1/*` disponible a través del mismo dominio.
+- Extender `Account` con rol (`user`/`admin`), estado activo/suspendido, perfil y plan. El primer admin se debe provisionar por comando/operación controlada, nunca por registro público ni contraseña por defecto.
+- Sesión web con cookie `Secure`, `HttpOnly`, `SameSite` y protección CSRF. Mantener las API keys existentes (`X-API-Key`) exclusivamente para clientes de conversión. La autorización siempre se verifica en backend; ocultar rutas en React no es control de acceso.
+- Mantener invitación de usuario vía correo con expiración y flujo para establecer contraseña/verificar cuenta. Log de auditoría admin sin contraseñas, claves, documentos ni contenido Markdown.
+
+### Modelo de planes y cuotas
+
+Crear migraciones versionadas; el arranque actual con `metadata.create_all` no sustituye migraciones de producción. Añadir catálogo editable de planes y asignación manual a cuentas. Campos mínimos por plan:
+
+- Conversión máxima por mes natural.
+- Bytes de entrada máximos por mes natural.
+- Unidades de página máximas por mes natural.
+- Requests por minuto.
+- Bytes máximos por archivo, sin superar 100 MiB globales.
+- Máximo de archivos por lote (inicia en 1).
+- OCR habilitado y unidades OCR por mes.
+- Nombre/beneficios/precio mostrado como información, sin iniciar cobros.
+
+Semántica de cuotas:
+
+- Calcular los límites de mes natural en `America/Mazatlan`; guardar todos los instantes en UTC y calcular los límites con `zoneinfo` para respetar cambios de horario.
+- Requests/minuto cuenta solicitudes de conversión autenticadas; mantener además límites globales/de abuso de infraestructura.
+- Bytes se contabilizan por bytes realmente recibidos/procesados, incluso si el conversor termina fallando. Rechazos previos a aceptar/leer la entrada no deben incrementar MB procesados.
+- Conversión/páginas solo se descuentan cuando la conversión termina correctamente. `page_count` almacenado puede quedar nulo; el valor `quota_page_units` aplica el fallback de 1 unidad indicado arriba.
+- OCR solo descuenta unidades realmente enviadas al proveedor. Registrar proveedor y unidades, no datos/imágenes del documento.
+- El admin puede editar límites; validar que los valores de cuenta no superen límites globales, particularmente tamaño de archivo y recursos de la VPS.
+
+### API administrativa propuesta
+
+- `GET /v1/admin/overview`: totales del periodo y estado operativo.
+- `GET /v1/admin/users`: búsqueda, filtros y paginación.
+- `POST /v1/admin/users`: crear cuenta invitada con plan/límites iniciales.
+- `GET /v1/admin/users/{id}` y `PATCH /v1/admin/users/{id}`: detalle, perfil, estado, plan y límites.
+- `GET /v1/admin/plans` y `POST/PATCH /v1/admin/plans`: catálogo y cuotas configurables.
+- `GET /v1/admin/reports/consumption`: filtros de periodo, cuenta, estado y origen; agrupaciones `day`, `week`, `month`; aceptar zona IANA del navegador.
+- `GET /v1/admin/reports/consumption.csv`: exportación paginada/streaming con límites de rango.
+- `GET/PATCH /v1/account/me`: perfil del usuario autenticado. Reutilizar gestión existente de claves API y `GET /v1/usage` donde sea apropiado.
+
+Los informes usarán agregaciones en PostgreSQL sobre Conversion (conteos, bytes/MB decimales, unidades de página, OCR, longitud de salida, estados y duración). Añadir índices y probar costes sobre registros indefinidos; no devolver documentos, URLs completas, claves o Markdown.
+
+### Rutas y experiencia de usuario
+
+- `/login`: login y verificación de estado de cuenta.
+- `/dashboard`: resúmenes personales o globales según rol.
+- `/convert`: archivo o URL, validación de límites/plan, progreso `queued`/`running`/resultado/error.
+- `/users` y `/users/:id`: solo admin; invitación, plan, cuotas, estado y consumo.
+- `/reports/consumption`: solo admin; agrupación día/semana/mes y filtros.
+- `/profile`: perfil, cambio/recuperación de contraseña, claves propias y uso personal.
+
+El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe recuperar el Markdown una vez, conservarlo solo en memoria durante la vista actual y ofrecer preview, copiar y guardar un Blob local; no volver a pedir el resultado al backend tras consumirlo. Evitar persistir contenido en `localStorage`, analytics o logs.
+
+### Fases para el siguiente agente
+
+1. Confirmar/implementar Alembic y migraciones para rol, estado, Plan, asignación, límites, invitación y auditoría.
+2. Añadir RBAC admin, verificación de cuenta activa, invitaciones y endpoints administrativos; probar acceso admin vs usuario en backend.
+3. Añadir entitlement/quota service compartido por upload y URL. Aplicar bucket mensual `America/Mazatlan`, requests/minuto, bytes, conversiones, páginas y unidades OCR con las semánticas anteriores.
+4. Añadir endpoints agregados/reportes antes de construir gráficas; no implementar agregación pesada en el browser.
+5. Crear SPA, login/sesión, shell responsive, Dashboard, Convert, Usuarios, Informes y Perfil.
+6. Añadir Nginx/gateway same-origin a Compose y actualizar route/domain de Dokploy al gateway. Verificar labels Traefik, `dokploy-network`, `/health/ready` y proxy `/v1`.
+7. Probar límites y rollover mensual con reloj/zona controlables, seguridad de rutas admin, invitaciones, OCR accounting, conversión web, streaming/one-time result, accesibilidad y export CSV.
+8. Antes de elevar límites o activar lotes/OCR comercialmente, medir en VPS Ubuntu de 2 CPU/2 GB; el benchmark aún está pendiente.
+
+### Pendiente de producto
+
+- Definir después del benchmark los valores numéricos de MB, páginas y RPM para Pro semanal/mensual/anual, Lifetime y Business; Free ya tiene 300/mes y 10 MiB/archivo.
+- Definir límites de conversiones por mes para planes de pago y cupo OCR por plan según coste real de Azure.
+- Confirmar si Free adopta solo el máximo mensual de 300 (sin límite diario), según el acuerdo actual.
+- Revisar moneda/precios visibles del catálogo; no integrar checkout hasta elegir proveedor de pagos.
+- Añadir organizaciones/membresías Business solo en una fase futura, si se solicita.

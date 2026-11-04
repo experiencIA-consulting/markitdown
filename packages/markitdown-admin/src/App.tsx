@@ -147,6 +147,7 @@ function App() {
     setUser(null); navigate('/login');
   };
   const onLogin = (nextUser: User) => { setUser(nextUser); setAuthError(''); navigate('/dashboard'); };
+  const isAdmin = user ? adminRole(user) : false;
 
   if (authLoading) return <div className="screen-loading"><span className="spinner" />Comprobando sesión…</div>;
 
@@ -158,9 +159,9 @@ function App() {
       <Route path="dashboard" element={<Dashboard user={user!} />} />
       <Route path="convert" element={<ConvertPage user={user!} />} />
       <Route path="plans" element={<PublicPlansPage />} />
-      <Route path="users" element={adminRole(user!) ? <UsersPage /> : <Navigate to="/dashboard" replace />} />
-      <Route path="users/:id" element={adminRole(user!) ? <UserDetailPage /> : <Navigate to="/dashboard" replace />} />
-      <Route path="reports/consumption" element={adminRole(user!) ? <ReportsPage /> : <Navigate to="/dashboard" replace />} />
+      <Route path="users" element={isAdmin ? <UsersPage /> : <Navigate to="/dashboard" replace />} />
+      <Route path="users/:id" element={isAdmin ? <UserDetailPage /> : <Navigate to="/dashboard" replace />} />
+      <Route path="reports/consumption" element={isAdmin ? <ReportsPage /> : <Navigate to="/dashboard" replace />} />
       <Route path="profile" element={<ProfilePage user={user!} onUserChange={setUser} onLogout={logout} />} />
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Route>

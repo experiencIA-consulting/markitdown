@@ -284,40 +284,42 @@ El GET de resultado es de descarga única y expira a las 24 horas. La SPA debe r
 - Revisar moneda/precios visibles del catálogo; no integrar checkout hasta elegir proveedor de pagos.
 - Añadir organizaciones/membresías Business solo en una fase futura, si se solicita.
 
-## Implementaci?n del portal y cuotas (estado)
+## Implementación del portal y cuotas (estado)
 
-**Estado:** backend y portal desplegados en la VPS el 2026-11-04. El gateway responde `/login`, `/health/live`, `/health/ready` y `/v1/plans`. Falta provisionar el primer administrador y activar/validar la matriz de cuotas del plan Free.
+**Estado:** backend y portal desplegados en la VPS el 2026-11-04. El gateway responde `/login`, `/health/live`, `/health/ready` y `/v1/plans`. Falta provisionar el primer administrador, configurar el plan Free y validar el flujo completo con una cuenta real.
 
 ### Backend
 
 - `packages/markitdown-api/` incorpora Alembic (`src/markitdown_api/migrations/`) y aplica `upgrade head` al arrancar. Una base existente sin `alembic_version` se marca como `0001_base` y luego recibe `0002_admin_portal`.
-- Nuevos modelos: `Plan`, `PlanAssignment`, `AccountQuotaOverride`, `Invitation`, `AdminAuditEvent`; `Account` a?ade `role`, `is_active`, `display_name`; `Conversion` a?ade `quota_page_units` y `ocr_units`.
-- `entitlements.py` calcula el mes natural en `America/Mazatlan` (configurable con `QUOTA_TIMEZONE`) y aplica cuotas de conversiones, bytes, p?ginas, RPM y OCR. Las conversiones fallidas no consumen conversiones/p?ginas pero s? bytes y requests/minuto. Las p?ginas reales se usan si existen; si no, 1 unidad por archivo. OCR se cuenta por llamadas reales al proveedor.
-- `POST /v1/web-auth/login`, `/me`, `/csrf`, `/logout`, `/accept-invitation`; sesi?n con cookies `HttpOnly`/`Secure`/`SameSite=strict` y CSRF en mutaciones.
-- `GET/PATCH /v1/account/me`, `POST /v1/account/password`; cambio de contrase?a revoca API keys e invalida la sesi?n.
+- Nuevos modelos: `Plan`, `PlanAssignment`, `AccountQuotaOverride`, `Invitation`, `AdminAuditEvent`; `Account` añade `role`, `is_active`, `display_name`; `Conversion` añade `quota_page_units` y `ocr_units`.
+- `entitlements.py` calcula el mes natural en `America/Mazatlan` (configurable con `QUOTA_TIMEZONE`) y aplica cuotas de conversiones, bytes, páginas, RPM y OCR. Las conversiones fallidas no consumen conversiones/páginas pero sí bytes y requests/minuto. Las páginas reales se usan si existen; si no, 1 unidad por archivo. OCR se cuenta por llamadas reales al proveedor.
+- `POST /v1/web-auth/login`, `/me`, `/csrf`, `/logout`, `/accept-invitation`; sesión con cookies `HttpOnly`/`Secure`/`SameSite=strict` y CSRF en mutaciones.
+- `GET/PATCH /v1/account/me`, `POST /v1/account/password`; cambio de contraseña revoca API keys e invalida la sesión.
 - Admin: `/v1/admin/overview`, `/v1/admin/users` (GET/POST/PATCH/detalle), `/v1/admin/plans` (GET/POST/PATCH), `/v1/admin/reports/consumption` y `.csv`. Todo pasa por `require_admin_account`.
-- Invitaciones requieren SMTP y un plan activo. El primer admin se crea con `python -m markitdown_api.admin_cli bootstrap-admin <email>` dentro del contenedor `api`; el enlace caduca en 7 d?as.
-- `GET /v1/plans` devuelve solo planes activos para el cat?logo informativo.
-- El registro p?blico queda desactivado por defecto (`PUBLIC_SIGNUP_ENABLED=false`). En este estado, un usuario sin plan activo recibe `plan_not_configured`; los admins pueden probar con l?mites globales.
-- Los planes sembrados est?n inactivos. Para activar Free/Pro/etc. hay que completar la matriz de cuotas (MB, p?ginas, RPM) desde administraci?n; los valores de pago siguen pendientes del benchmark.
+- Invitaciones requieren SMTP y un plan activo. El primer admin se crea con `python -m markitdown_api.admin_cli bootstrap-admin <email>` dentro del contenedor `api`; el enlace caduca en 7 días. Si SMTP falla, el comando imprime el enlace de invitación.
+- `GET /v1/plans` devuelve solo planes activos para el catálogo informativo.
+- El registro público queda desactivado por defecto (`PUBLIC_SIGNUP_ENABLED=false`). Un usuario sin plan activo recibe `plan_not_configured`; los admins pueden probar con límites globales.
+- Los planes sembrados están inactivos. Para activar Free/Pro/etc. hay que completar la matriz de cuotas (MB, páginas, RPM) desde administración; los valores de pago siguen pendientes del benchmark.
 
 ### Frontend
 
 - `packages/markitdown-admin/` (React + TypeScript + Vite) con `/login`, `/accept-invitation`, `/dashboard`, `/convert`, `/plans`, `/users`, `/users/:id`, `/reports/consumption`, `/profile`.
-- Conversi?n web con archivo o URL, polling, preview Markdown en memoria, copiar y descarga; no persiste resultados.
-- Usuarios: invitaci?n con plan activo, edici?n de rol/estado, overrides de cuotas por usuario (heredar del plan o valor expl?cito).
-- Informes con agrupaci?n y zona IANA del navegador; export CSV.
-- Cat?logo `/plans` informativo, sin checkout.
+- Conversión web con archivo o URL, polling, preview Markdown en memoria, copiar y descarga; no persiste resultados.
+- Usuarios: invitación con plan activo, edición de rol/estado, overrides de cuotas por usuario (heredar del plan o valor explícito).
+- Informes con agrupación y zona IANA del navegador; export CSV.
+- Catálogo `/plans` informativo, sin checkout.
+- `packages/markitdown-admin/nginx.conf` evita caché del `index.html` y cachea los assets con hash de forma inmutable.
 
-### Despliegue y verificaci?n
+### Despliegue y verificación
 
-- Compose a?ade `admin-web` (Nginx) que sirve la SPA y proxya `/v1/*`, `/health/*`, `/docs` y p?ginas de correo a `api:8000`.
-- El dominio de Dokploy ya apunta a `admin-web:80`; API, worker, PostgreSQL, Redis y `admin-web` est?n activos y saludables.
+- Compose añade `admin-web` (Nginx) que sirve la SPA y proxya `/v1/*`, `/health/*`, `/docs` y páginas de correo a `api:8000`.
+- El dominio de Dokploy apunta a `admin-web:80`; API, worker, PostgreSQL, Redis y `admin-web` están activos y saludables.
 - Verificados remotamente `/health/live`, `/health/ready`, `/login`, `/docs` y `/v1/plans`. El build del frontend (TypeScript + Vite) pasa.
-- Pendiente operativo: provisionar el primer administrador, configurar SMTP si no est? listo, completar y activar el plan Free, y probar el flujo completo de invitaci?n y conversi?n con una cuenta real.
+- Pendiente operativo: provisionar el primer administrador, configurar SMTP si no está listo, completar y activar el plan Free, y probar invitación y conversión con una cuenta real.
 
-### Mejora de extracci?n PDF
+### Extracción de PDF
 
-- Los PDF sin OCR usan `pymupdf4llm==1.28.2` (PyMuPDF 1.28.2) como motor principal y conservan MarkItDown como fallback. Esto corrige tablas y espaciado que pdfminer/pdfplumber romp?an en documentos con fuentes incrustadas.
+- Los PDF sin OCR usan `pymupdf4llm==1.28.2` (PyMuPDF 1.28.2) como motor principal, con `use_ocr=False`, y conservan MarkItDown como fallback. Esto corrige tablas y espaciado que pdfminer/pdfplumber rompían en documentos con fuentes incrustadas.
 - OCR sigue usando el plugin MarkItDown + Azure; PyMuPDF 1.28.2 cumple el rango `<2` del plugin OCR.
-- Revisar la licencia AGPL/comercial de PyMuPDF/PyMuPDF4LLM antes de una explotaci?n comercial p?blica.
+- `PDF_ENGINE` permite elegir `pymupdf4llm` (predeterminado) o `markitdown` sin cambiar código.
+- Revisar la licencia AGPL/comercial de PyMuPDF/PyMuPDF4LLM antes de una explotación comercial pública.
